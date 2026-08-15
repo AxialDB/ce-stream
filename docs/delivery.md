@@ -1,8 +1,21 @@
-# Delivery semantics (Phase 4)
+# Delivery semantics (Phase 4 + Issue #1)
 
-**Status:** Done. At-least-once + backpressure + `payload_mode`. Encoding: JSON default; optional Avro ([`avro.md`](avro.md)). Other DB engines deferred ([`planning.md`](planning.md)).
+**Status:** Commit-boundary delivery + `delivery_unit` (v0.2.0). At-least-once + backpressure + `payload_mode`. Encoding: JSON default; optional Avro ([`avro.md`](avro.md)). Other DB engines deferred ([`planning.md`](planning.md)).
 
 ce-stream is **at-least-once**, not exactly-once.
+
+## Commit-boundary emit (v0.2.0)
+
+Regardless of `delivery_unit`, the MySQL adapter **buffers** row and DDL events until **XID**. Consumers see **nothing mid-transaction**.
+
+After XID, delivery shape depends on `source.delivery_unit`:
+
+| `delivery_unit` | After XID | Checkpoint |
+|-----------------|-----------|------------|
+| `row` (default) | M DDL CloudEvents + N row CloudEvents, in order | After all M+N sink acks |
+| `transaction` | One `CommittedTransaction` envelope | After one sink ack |
+
+If the process crashes **after** some post-XID deliveries but **before** checkpoint, the **entire commit** is redelivered on restart (duplicates acceptable).
 
 ## What “issued” means
 
@@ -32,4 +45,11 @@ Signal mode reduces payload size and sink cost; you lose row images.
 
 ## Encoding (JSON vs Avro)
 
-Default sink encoding is CloudEvents structured **JSON**. Set `sink.format = "avro"` for optional binary Avro (same logical event). See [`avro.md`](avro.md). Checkpoint and delivery semantics are unchanged.
+Default sink encoding is **JSON**. Set `sink.format = "avro"` for optional binary Avro (same logical payload).
+
+| `delivery_unit` | `format=json` | `format=avro` |
+|-----------------|---------------|---------------|
+| `row` | CloudEvents structured JSON per row | `ce-stream.cloudevent.v1` per row |
+| `transaction` | One JSON envelope per commit | `ce-stream.committed-transaction.v1` per commit |
+
+See [`avro.md`](avro.md). Checkpoint and delivery semantics are unchanged.

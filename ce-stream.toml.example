@@ -15,6 +15,8 @@ server_id = 19001
 tls = true
 # full = before/after images; signal = op only
 payload_mode = "full"
+# row = one CloudEvent per message after commit; transaction = one envelope per commit
+delivery_unit = "row"
 # Bounded queue; reader blocks when sink is slow (no drops)
 queue_capacity = 64
 
@@ -30,5 +32,7 @@ path = ".ce-stream/checkpoint.json"
 kind = "stdout"
 # kind = "http"
 # url = "http://127.0.0.1:18080/events"
-# Wire format: json (default) | avro  — see docs/avro.md
+# Wire format: json (default) | avro — see docs/avro.md
+# Row mode + avro  -> ce-stream.cloudevent.v1 per message
+# Transaction mode + avro -> ce-stream.committed-transaction.v1 per commit
 format = "json"

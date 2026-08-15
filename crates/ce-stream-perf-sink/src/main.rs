@@ -25,10 +25,15 @@ struct Args {
     /// Artificial handling delay per POST (choke scenario).
     #[arg(long, default_value_t = 0)]
     delay_ms: u64,
+
+    /// After N successful POST responses, hang on the next request (crash harness).
+    #[arg(long, default_value_t = 0)]
+    stall_after: u64,
 }
 
 struct AppState {
     delay: Duration,
+    stall_after: u64,
     received: AtomicU64,
     bytes: AtomicU64,
 }
@@ -54,6 +59,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         delay: Duration::from_millis(args.delay_ms),
+        stall_after: args.stall_after,
         received: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
     });
@@ -64,7 +70,7 @@ async fn main() {
         .route("/reset", post(reset))
         .with_state(state.clone());
 
-    tracing::info!(%addr, delay_ms = args.delay_ms, "perf sink listening");
+    tracing::info!(%addr, delay_ms = args.delay_ms, stall_after = args.stall_after, "perf sink listening");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
@@ -72,6 +78,11 @@ async fn main() {
 }
 
 async fn events(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
+    let seen = state.received.load(Ordering::SeqCst);
+    if state.stall_after > 0 && seen >= state.stall_after {
+        tracing::info!(seen, stall_after = state.stall_after, "stalling POST for crash harness");
+        std::future::pending::<()>().await;
+    }
     if !state.delay.is_zero() {
         tokio::time::sleep(state.delay).await;
     }

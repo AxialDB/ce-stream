@@ -1,3 +1,7 @@
+# Default PR/main gate: fmt, clippy, unit tests. No MySQL, no crash harness.
+# Live capture / Gate 0 crash harness is lab-only (scripts/crash-harness/).
+# Release binaries: .github/workflows/release.yml (Linux + Windows, no MySQL).
+
 name: CI
 
 on:
@@ -38,4 +42,4 @@ jobs:
           -- -D warnings
 
       - name: cargo test (unit, no MySQL)
-        run: cargo test -p ce-stream-core -p ce-stream-mysql --lib
+        run: cargo test -p ce-stream-core -p ce-stream-mysql

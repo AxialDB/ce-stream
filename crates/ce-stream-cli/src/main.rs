@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ce_stream_core::event::{CloudEvent, PayloadMode, SinkFormat, TableRef};
-use ce_stream_core::source::{ChangeSource, SourceConfig};
+use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
 use ce_stream_core::{CheckpointStore, HttpSink, Sink, StdoutSink};
 use ce_stream_mysql::{FileCheckpointStore, MysqlBinlogSource, MysqlSourceOptions};
 use clap::Parser;
@@ -24,6 +24,10 @@ struct Args {
     /// Stop after N CloudEvents (0 = run forever). Smoke/CI only - not for production.
     #[arg(long, default_value_t = 0)]
     max_events: u64,
+
+    /// Skip MySQL capture gate checks (lab escape hatch only).
+    #[arg(long)]
+    skip_gate_check: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +52,9 @@ struct SourceSection {
     /// full | signal
     #[serde(default = "default_payload_mode")]
     payload_mode: String,
+    /// row (default) | transaction — see docs/issues/1.md
+    #[serde(default = "default_delivery_unit")]
+    delivery_unit: String,
     /// Bounded queue; reader blocks when full (backpressure).
     #[serde(default = "default_queue_capacity")]
     queue_capacity: usize,
@@ -74,6 +81,10 @@ fn default_true() -> bool {
 
 fn default_payload_mode() -> String {
     "full".into()
+}
+
+fn default_delivery_unit() -> String {
+    "row".into()
 }
 
 fn default_queue_capacity() -> usize {
@@ -129,6 +140,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .collect::<Result<Vec<_>, _>>()?;
 
     let payload_mode = parse_payload_mode(&cfg.source.payload_mode)?;
+    let delivery_unit = parse_delivery_unit(&cfg.source.delivery_unit)?;
     let sink_format = parse_sink_format(&cfg.sink.format)?;
 
     let out = match cfg.sink.kind.as_str() {
@@ -164,6 +176,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tls = cfg.source.tls,
         tables = ?cfg.source.include_tables,
         payload_mode = %cfg.source.payload_mode,
+        delivery_unit = %cfg.source.delivery_unit,
         queue_capacity = cfg.source.queue_capacity,
         sink = %cfg.sink.kind,
         sink_format = %cfg.sink.format,
@@ -187,9 +200,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             include_tables,
             payload_mode,
             queue_capacity: cfg.source.queue_capacity,
+            delivery_unit,
         },
         checkpoint,
         checkpoint_store: Some(Box::new(store)),
+        skip_gate_check: args.skip_gate_check,
     };
 
     let emitted = Arc::new(AtomicU64::new(0));
@@ -197,57 +212,125 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let emitted_cb = Arc::clone(&emitted);
     let started = Instant::now();
     let handle = tokio::runtime::Handle::current();
+    let sink_format_for_txn = sink_format;
 
-    source
-        .run(|ev: CloudEvent| {
-            let emit_result = tokio::task::block_in_place(|| match &out {
-                OutSink::Stdout(s) => handle.block_on(s.emit(&ev)),
-                OutSink::Http(s) => handle.block_on(s.emit(&ev)),
-            });
-            emit_result?;
+    let run_result = if delivery_unit == DeliveryUnit::Row {
+        source
+            .run(|ev: CloudEvent| {
+                emit_row(&out, &handle, &ev)?;
 
-            let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
-            let gtid = ev
-                .extensions
-                .get("gtid")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let lag_ms = event_lag_ms(&ev);
-            if n == 1 || n % 100 == 0 {
-                tracing::info!(
-                    target: "ce_stream::health",
-                    events_total = n,
-                    last_gtid = %gtid,
-                    subject = %ev.subject,
-                    lag_ms,
-                    uptime_secs = started.elapsed().as_secs(),
-                    "capture health"
-                );
-            }
+                let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
+                log_row_health(n, &ev, &started);
 
-            if max > 0 && n >= max {
-                return Err(ce_stream_core::Error::Source(format!(
-                    "reached max_events={max}"
-                )));
-            }
-            Ok(())
-        })
-        .await
-        .or_else(|e| {
-            if e.to_string().contains("reached max_events=") {
-                tracing::info!(
-                    target: "ce_stream::health",
-                    count = emitted.load(Ordering::SeqCst),
-                    uptime_secs = started.elapsed().as_secs(),
-                    "stopped at max_events"
-                );
+                if max > 0 && n >= max {
+                    return Err(ce_stream_core::Error::Source(format!(
+                        "reached max_events={max}"
+                    )));
+                }
                 Ok(())
-            } else {
-                Err(e)
-            }
-        })?;
+            })
+            .await
+    } else {
+        source
+            .run_transactions(|txn| {
+                emit_transaction(&out, &handle, &txn, sink_format_for_txn)?;
+
+                let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1 || n % 100 == 0 {
+                    tracing::info!(
+                        target: "ce_stream::health",
+                        commits_total = n,
+                        last_gtid = %txn.gtid,
+                        rows_in_commit = txn.events.len(),
+                        uptime_secs = started.elapsed().as_secs(),
+                        "capture health"
+                    );
+                }
+
+                if max > 0 && n >= max {
+                    return Err(ce_stream_core::Error::Source(format!(
+                        "reached max_events={max}"
+                    )));
+                }
+                Ok(())
+            })
+            .await
+    };
+
+    run_result.or_else(|e| {
+        if e.to_string().contains("reached max_events=") {
+            tracing::info!(
+                target: "ce_stream::health",
+                count = emitted.load(Ordering::SeqCst),
+                uptime_secs = started.elapsed().as_secs(),
+                "stopped at max_events"
+            );
+            Ok(())
+        } else {
+            Err(e)
+        }
+    })?;
 
     Ok(())
+}
+
+fn emit_row(
+    out: &OutSink,
+    handle: &tokio::runtime::Handle,
+    ev: &CloudEvent,
+) -> Result<(), ce_stream_core::Error> {
+    tokio::task::block_in_place(|| match out {
+        OutSink::Stdout(s) => handle.block_on(s.emit(ev)),
+        OutSink::Http(s) => handle.block_on(s.emit(ev)),
+    })
+}
+
+fn emit_transaction(
+    out: &OutSink,
+    handle: &tokio::runtime::Handle,
+    txn: &ce_stream_core::CommittedTransaction,
+    format: SinkFormat,
+) -> Result<(), ce_stream_core::Error> {
+    tokio::task::block_in_place(|| match out {
+        OutSink::Stdout(_) => match format {
+            SinkFormat::Json => {
+                let line = serde_json::to_string(txn)
+                    .map_err(|e| ce_stream_core::Error::Sink(e.to_string()))?;
+                println!("{line}");
+                Ok(())
+            }
+            SinkFormat::Avro => {
+                let bytes = ce_stream_core::avro_encode::encode_committed_transaction(txn)?;
+                let b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                );
+                println!("{b64}");
+                Ok(())
+            }
+        },
+        OutSink::Http(s) => handle.block_on(s.post_committed_transaction(txn)),
+    })
+}
+
+fn log_row_health(n: u64, ev: &CloudEvent, started: &Instant) {
+    let gtid = ev
+        .extensions
+        .get("gtid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let lag_ms = event_lag_ms(ev);
+    if n == 1 || n.is_multiple_of(100) {
+        tracing::info!(
+            target: "ce_stream::health",
+            events_total = n,
+            last_gtid = %gtid,
+            subject = %ev.subject,
+            lag_ms,
+            uptime_secs = started.elapsed().as_secs(),
+            "capture health"
+        );
+    }
 }
 
 fn event_lag_ms(ev: &CloudEvent) -> i64 {
@@ -264,6 +347,16 @@ fn parse_payload_mode(s: &str) -> Result<PayloadMode, String> {
         "signal" => Ok(PayloadMode::Signal),
         other => Err(format!(
             "source.payload_mode must be full|signal, got {other}"
+        )),
+    }
+}
+
+fn parse_delivery_unit(s: &str) -> Result<DeliveryUnit, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "row" => Ok(DeliveryUnit::Row),
+        "transaction" => Ok(DeliveryUnit::Transaction),
+        other => Err(format!(
+            "source.delivery_unit must be row|transaction, got {other}"
         )),
     }
 }
@@ -305,6 +398,7 @@ fn validate_config(cfg: &FileConfig) -> Result<(), String> {
         return Err("source.queue_capacity must be >= 1".into());
     }
     parse_payload_mode(&cfg.source.payload_mode)?;
+    parse_delivery_unit(&cfg.source.delivery_unit)?;
     parse_sink_format(&cfg.sink.format)?;
     if !cfg.source.tls {
         tracing::warn!("source.tls=false; TLS is recommended for production capture");

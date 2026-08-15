@@ -9,12 +9,17 @@ Also see [`delivery.md`](delivery.md) (at-least-once), [`library.md`](library.md
 ## MySQL prerequisites
 
 ```sql
--- required
--- log_bin=ON, ROW, binlog_row_image=FULL, gtid_mode=ON
+-- required (ce-stream validates these at connect unless --skip-gate-check)
+-- log_bin=ON, binlog_format=ROW, binlog_row_image=FULL, gtid_mode=ON
 
--- recommended for named columns
+-- required for named columns (hard-fail if not FULL)
 SET PERSIST binlog_row_metadata = 'FULL';
+
+-- recommended
+SET PERSIST enforce_gtid_consistency = ON;
 ```
+
+On startup, ce-stream runs capture gate checks via `SHOW VARIABLES`. Use `--skip-gate-check` only in lab environments.
 
 Replication user: `REPLICATION SLAVE`, `REPLICATION CLIENT`, typically `SELECT` (`scripts/spike-setup.sql`).
 
@@ -40,6 +45,8 @@ port = 3306
 tls = true
 server_id = 19001          # unique per ce-stream instance
 payload_mode = "full"      # or "signal"
+# row = one CloudEvent per message after commit; transaction = one envelope per commit
+delivery_unit = "row"
 queue_capacity = 64
 include_tables = ["demo_perf.orders"]
 
@@ -71,3 +78,18 @@ Uses `--max-events 1` and a local HttpListener (emitter + catcher in one script)
 ## HTTP body
 
 `Content-Type: application/cloudevents+json` — structured-mode JSON with `gtid` / `gtidset` extensions when available.
+
+## Regression: mid-transaction crash (Gate 0)
+
+Validates [#1](https://github.com/ce-stream/ce-stream/issues/1): kill ce-stream after the first row of a 3-row commit is delivered; checkpoint must not advance; restart must redeliver the full transaction.
+
+**AxialDB harness** (MySQL 9.x lab, Windows or WSL):
+
+- [`scripts/crash-harness/README.md`](../../scripts/crash-harness/README.md)
+- Windows: `.\scripts\crash-harness\mysql\run-crash-harness.ps1`
+- WSL Ubuntu (port 3307): `.\scripts\crash-harness\mysql\run-crash-harness.ps1 -Wsl`
+
+Requires `binlog_row_metadata=FULL`, `CE_STREAM_PASSWORD`, `MYSQL_DEFAULTS_FILE`, and `ce-stream-perf-sink --stall-after 1`. Lab-only (not GitHub Actions). Expected result: **PASS**.
+
+Unit tests (no MySQL): `cargo test -p ce-stream-mysql --test txn_checkpoint`.
+

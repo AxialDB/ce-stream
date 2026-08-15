@@ -1,6 +1,12 @@
 //! MySQL 9.x ROW binlog → [`ce_stream_core::CloudEvent`].
 
+mod binlog_dispatch;
+mod ddl;
+mod dispatch;
+mod gate;
+mod gtid;
 mod map;
+mod txn_buffer;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,19 +14,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use binlog_dispatch::{dispatch_binlog_event, BinlogDispatchCtx, TableMap};
 use ce_stream_core::{
     error::{Error, Result},
-    event::{ChangeOp, CloudEvent, PayloadMode, TableRef},
-    source::{ChangeSource, SourceConfig},
+    event::{CloudEvent, PayloadMode},
+    source::{ChangeSource, DeliveryUnit, SourceConfig},
+    transaction::CommittedTransaction,
     Checkpoint, CheckpointStore,
 };
-use map::GtidTracker;
-use mysql_binlog_connector_rust::binlog_client::{BinlogClient, StartPosition};
-use mysql_binlog_connector_rust::event::event_data::EventData;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use tracing::{debug, info, warn};
+use tracing::info;
 
+pub use dispatch::deliver_committed;
+pub use ddl::DDL_CE_TYPE;
+pub use gate::{validate_capture_gates, GateReport};
+pub use gtid::ExecutedSet;
 pub use map::column_value_to_json;
+pub use txn_buffer::TxnBuffer;
+
+use mysql_binlog_connector_rust::binlog_client::{BinlogClient, StartPosition};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 #[derive(Debug, Clone)]
 pub struct MysqlSourceOptions {
@@ -52,22 +64,11 @@ pub struct MysqlBinlogSource {
     pub config: SourceConfig,
     pub checkpoint: Option<Checkpoint>,
     pub checkpoint_store: Option<Box<dyn CheckpointStore>>,
+    /// Skip [`validate_capture_gates`] (lab escape hatch only).
+    pub skip_gate_check: bool,
 }
 
 impl MysqlBinlogSource {
-    fn start_position(&self) -> StartPosition {
-        if let Some(cp) = &self.checkpoint {
-            if cp.adapter == "mysql" {
-                if let Some(gtid) = cp.payload.get("gtid").and_then(|v| v.as_str()) {
-                    if !gtid.is_empty() {
-                        return StartPosition::Gtid(gtid.to_string());
-                    }
-                }
-            }
-        }
-        StartPosition::Latest
-    }
-
     fn include_set(&self) -> HashSet<String> {
         self.config
             .include_tables
@@ -76,59 +77,111 @@ impl MysqlBinlogSource {
             .collect()
     }
 
-    fn initial_gtid_tracker(&self) -> GtidTracker {
+    fn initial_executed_set(&self) -> Result<ExecutedSet> {
         if let Some(cp) = &self.checkpoint {
             if let Some(gtid) = cp.payload.get("gtid").and_then(|v| v.as_str()) {
-                return GtidTracker::from_set_string(gtid);
+                return ExecutedSet::from_set_string(gtid);
             }
         }
-        GtidTracker::default()
+        Ok(ExecutedSet::default())
     }
 
-    async fn persist_gtid_set(&mut self, gtid_set: &str) -> Result<()> {
-        if gtid_set.is_empty() {
-            return Ok(());
+    fn seed_baseline_gtid(&mut self, baseline: &str) {
+        if baseline.trim().is_empty() {
+            return;
         }
-        let cp = Checkpoint {
+        let mut cp = self.checkpoint.clone().unwrap_or_else(|| Checkpoint {
             adapter: "mysql".into(),
-            payload: serde_json::json!({ "gtid": gtid_set }),
-        };
-        if let Some(store) = &self.checkpoint_store {
-            store.save(&cp).await?;
+            payload: serde_json::json!({}),
+        });
+        let has_baseline = cp
+            .payload
+            .get("baseline_gtid")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !has_baseline {
+            cp.payload["baseline_gtid"] = serde_json::Value::String(baseline.to_string());
+            self.checkpoint = Some(cp);
         }
-        self.checkpoint = Some(cp);
-        Ok(())
     }
-}
 
-#[async_trait]
-impl ChangeSource for MysqlBinlogSource {
-    async fn run<F>(&mut self, mut on_event: F) -> Result<()>
+    async fn resolve_binlog_start(&self) -> Result<StartPosition> {
+        let Some(cp) = &self.checkpoint else {
+            return Ok(StartPosition::Latest);
+        };
+        if cp.adapter != "mysql" {
+            return Ok(StartPosition::Latest);
+        }
+        let Some(checkpoint_gtid) = cp
+            .payload
+            .get("gtid")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(StartPosition::Latest);
+        };
+
+        let baseline = cp.payload.get("baseline_gtid").and_then(|v| v.as_str());
+        let url = self.options.connection_url();
+        let purged = gate::fetch_global_gtid(&url, "gtid_purged").await?;
+        let handshake =
+            ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)?;
+        info!(handshake_gtid = %handshake, "resuming binlog from checkpoint");
+        Ok(StartPosition::Gtid(handshake))
+    }
+
+    async fn run_capture<RowFn, TxnFn>(
+        &mut self,
+        mut on_row: RowFn,
+        mut on_txn: TxnFn,
+    ) -> Result<()>
     where
-        F: FnMut(CloudEvent) -> Result<()> + Send,
+        RowFn: FnMut(CloudEvent) -> Result<()> + Send,
+        TxnFn: FnMut(CommittedTransaction) -> Result<()> + Send,
     {
         let url = self.options.connection_url();
         let server_id = self.options.server_id;
-        let start = self.start_position();
+
+        if !self.skip_gate_check {
+            let report = gate::validate_capture_gates(&url).await?;
+            for warning in &report.warnings {
+                tracing::warn!(gate_warning = %warning, "capture gate warning");
+            }
+            info!("capture gates passed");
+        }
+
+        let start = self.resolve_binlog_start().await?;
+        if matches!(start, StartPosition::Latest) {
+            let baseline = gate::fetch_global_gtid(&url, "gtid_executed").await?;
+            self.seed_baseline_gtid(&baseline);
+            info!(baseline_gtid = %baseline, "recorded connect baseline for GTID resume");
+        }
+
         let source_id = self.config.source_id.clone();
         let include = self.include_set();
-        let tracker = self.initial_gtid_tracker();
         let payload_mode = self.config.payload_mode;
+        let delivery_unit = self.config.delivery_unit;
         let capacity = self.config.queue_capacity.max(1);
+
+        let executed = Arc::new(tokio::sync::Mutex::new(self.initial_executed_set()?));
+        let executed_bg = Arc::clone(&executed);
 
         info!(
             server_id,
             source = %source_id,
             include = ?include,
             ?payload_mode,
+            ?delivery_unit,
             queue_capacity = capacity,
             "starting MySQL binlog source"
         );
 
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<std::result::Result<StreamMsg, String>>(capacity);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<
+            std::result::Result<CommittedTransaction, String>,
+        >(capacity);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = Arc::clone(&stop);
+        let source_id_delivery = source_id.clone();
 
         let join = tokio::task::spawn_blocking(move || {
             async_std::task::block_on(binlog_loop(
@@ -137,7 +190,7 @@ impl ChangeSource for MysqlBinlogSource {
                 start,
                 source_id,
                 include,
-                tracker,
+                executed_bg,
                 payload_mode,
                 tx,
                 stop_bg,
@@ -147,14 +200,19 @@ impl ChangeSource for MysqlBinlogSource {
         let result = async {
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Ok(StreamMsg::Event { event, gtid_set }) => {
-                        // At-least-once: only advance checkpoint after sink Ok.
-                        on_event(event)?;
-                        self.persist_gtid_set(&gtid_set).await?;
-                    }
-                    Ok(StreamMsg::Advance { gtid_set }) => {
-                        // Filtered / no delivery; safe to advance without sink.
-                        self.persist_gtid_set(&gtid_set).await?;
+                    Ok(txn) => {
+                        let mut shared = executed.lock().await;
+                        deliver_committed(
+                            txn,
+                            &source_id_delivery,
+                            delivery_unit,
+                            &mut shared,
+                            &mut self.checkpoint_store,
+                            &mut self.checkpoint,
+                            &mut on_row,
+                            &mut on_txn,
+                        )
+                        .await?;
                     }
                     Err(e) => return Err(Error::Source(e)),
                 }
@@ -170,11 +228,41 @@ impl ChangeSource for MysqlBinlogSource {
     }
 }
 
-enum StreamMsg {
-    /// Deliver event; persist `gtid_set` only after callback Ok.
-    Event { event: CloudEvent, gtid_set: String },
-    /// No event (filtered); persist `gtid_set` immediately.
-    Advance { gtid_set: String },
+#[async_trait]
+impl ChangeSource for MysqlBinlogSource {
+    async fn run<F>(&mut self, on_event: F) -> Result<()>
+    where
+        F: FnMut(CloudEvent) -> Result<()> + Send,
+    {
+        if self.config.delivery_unit != DeliveryUnit::Row {
+            return Err(Error::Source(
+                "run() requires source.delivery_unit = row".into(),
+            ));
+        }
+        self.run_capture(on_event, |_| Ok(())).await
+    }
+
+    async fn run_transactions<F>(&mut self, on_txn: F) -> Result<()>
+    where
+        F: FnMut(CommittedTransaction) -> Result<()> + Send,
+    {
+        if self.config.delivery_unit != DeliveryUnit::Transaction {
+            return Err(Error::Source(
+                "run_transactions() requires source.delivery_unit = transaction".into(),
+            ));
+        }
+        self.run_capture(|_| Ok(()), on_txn).await
+    }
+}
+
+fn compression_read_error(err: impl std::fmt::Display) -> String {
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("zstd") || lower.contains("decompress") || lower.contains("compression") {
+        format!("binlog transaction compression: {msg}")
+    } else {
+        format!("binlog read: {msg}")
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -184,9 +272,9 @@ async fn binlog_loop(
     start: StartPosition,
     source_id: String,
     include: HashSet<String>,
-    mut tracker: GtidTracker,
+    executed: Arc<tokio::sync::Mutex<ExecutedSet>>,
     payload_mode: PayloadMode,
-    tx: tokio::sync::mpsc::Sender<std::result::Result<StreamMsg, String>>,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<CommittedTransaction, String>>,
     stop: Arc<AtomicBool>,
 ) -> std::result::Result<(), String> {
     let mut client = BinlogClient::new(url.as_str(), server_id, start)
@@ -201,7 +289,7 @@ async fn binlog_loop(
     info!("binlog connected");
 
     let mut tables: HashMap<u64, TableMap> = HashMap::new();
-    let mut last_gtid: Option<String> = None;
+    let mut txn = TxnBuffer::default();
 
     while !stop.load(Ordering::SeqCst) {
         let read = stream.read().await;
@@ -215,200 +303,21 @@ async fn binlog_loop(
                 if msg.to_ascii_lowercase().contains("timeout") {
                     continue;
                 }
-                return Err(format!("binlog read: {e}"));
+                tracing::error!(error = %msg, "binlog read failed");
+                return Err(compression_read_error(e));
             }
         };
 
-        match data {
-            EventData::Gtid(g) => {
-                last_gtid = Some(g.gtid.clone());
-                tracker.add_gtid(&g.gtid);
-            }
-            EventData::TableMap(tm) => {
-                let col_names = column_names_from_table_map(&tm);
-                tables.insert(
-                    tm.table_id,
-                    TableMap {
-                        table: TableRef::new(tm.database_name, tm.table_name),
-                        col_names,
-                    },
-                );
-            }
-            EventData::WriteRows(e) => {
-                emit_rows(
-                    &tx,
-                    &source_id,
-                    &include,
-                    &tables,
-                    e.table_id,
-                    ChangeOp::Insert,
-                    &last_gtid,
-                    &tracker,
-                    payload_mode,
-                    e.rows.iter().map(|r| (None, Some(r))),
-                )?;
-            }
-            EventData::UpdateRows(e) => {
-                emit_rows(
-                    &tx,
-                    &source_id,
-                    &include,
-                    &tables,
-                    e.table_id,
-                    ChangeOp::Update,
-                    &last_gtid,
-                    &tracker,
-                    payload_mode,
-                    e.rows.iter().map(|(b, a)| (Some(b), Some(a))),
-                )?;
-            }
-            EventData::DeleteRows(e) => {
-                emit_rows(
-                    &tx,
-                    &source_id,
-                    &include,
-                    &tables,
-                    e.table_id,
-                    ChangeOp::Delete,
-                    &last_gtid,
-                    &tracker,
-                    payload_mode,
-                    e.rows.iter().map(|r| (Some(r), None)),
-                )?;
-            }
-            EventData::Xid(_) => {
-                // Covered by per-event / Advance checkpoints.
-            }
-            EventData::HeartBeat => debug!("heartbeat"),
-            other => debug!(?other, "ignored binlog event"),
-        }
-    }
-
-    Ok(())
-}
-
-struct TableMap {
-    table: TableRef,
-    col_names: Vec<String>,
-}
-
-fn column_names_from_table_map(
-    tm: &mysql_binlog_connector_rust::event::table_map_event::TableMapEvent,
-) -> Vec<String> {
-    if let Some(meta) = &tm.table_metadata {
-        let names: Vec<String> = meta
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| c.column_name.clone().unwrap_or_else(|| format!("col_{i}")))
-            .collect();
-        if names.iter().any(|n| !n.starts_with("col_")) {
-            return names;
-        }
-        if !names.is_empty() {
-            return names;
-        }
-    }
-    (0..tm.column_types.len())
-        .map(|i| format!("col_{i}"))
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_rows<'a, I>(
-    tx: &tokio::sync::mpsc::Sender<std::result::Result<StreamMsg, String>>,
-    source_id: &str,
-    include: &HashSet<String>,
-    tables: &HashMap<u64, TableMap>,
-    table_id: u64,
-    op: ChangeOp,
-    last_gtid: &Option<String>,
-    tracker: &GtidTracker,
-    payload_mode: PayloadMode,
-    rows: I,
-) -> std::result::Result<(), String>
-where
-    I: Iterator<
-        Item = (
-            Option<&'a mysql_binlog_connector_rust::event::row_event::RowEvent>,
-            Option<&'a mysql_binlog_connector_rust::event::row_event::RowEvent>,
-        ),
-    >,
-{
-    let Some(tm) = tables.get(&table_id) else {
-        warn!(table_id, "row event without table_map; skipping");
-        return Ok(());
-    };
-    let subject = tm.table.as_subject();
-    let gtid_set = tracker.to_set_string();
-
-    if !include.is_empty() && !include.contains(&subject) {
-        // Backpressure-aware advance for filtered traffic.
-        if !gtid_set.is_empty() {
-            tx.blocking_send(Ok(StreamMsg::Advance { gtid_set }))
-                .map_err(|_| "event channel closed".to_string())?;
-        }
-        return Ok(());
-    }
-
-    let mut emitted = 0u32;
-    for (before, after) in rows {
-        let data = match payload_mode {
-            PayloadMode::Signal => serde_json::json!({
-                "op": op.as_str(),
-                "signal": true,
-            }),
-            PayloadMode::Full => match op {
-                ChangeOp::Insert => {
-                    let after = after.ok_or_else(|| "insert missing after".to_string())?;
-                    serde_json::json!({
-                        "op": "insert",
-                        "after": map::row_to_object(&tm.col_names, after),
-                    })
-                }
-                ChangeOp::Update => {
-                    let before = before.ok_or_else(|| "update missing before".to_string())?;
-                    let after = after.ok_or_else(|| "update missing after".to_string())?;
-                    serde_json::json!({
-                        "op": "update",
-                        "before": map::row_to_object(&tm.col_names, before),
-                        "after": map::row_to_object(&tm.col_names, after),
-                    })
-                }
-                ChangeOp::Delete => {
-                    let before = before.ok_or_else(|| "delete missing before".to_string())?;
-                    serde_json::json!({
-                        "op": "delete",
-                        "before": map::row_to_object(&tm.col_names, before),
-                    })
-                }
-            },
+        let mut ctx = BinlogDispatchCtx {
+            txn: &mut txn,
+            executed: &executed,
+            tables: &mut tables,
+            source_id: &source_id,
+            include: &include,
+            payload_mode,
+            tx: &tx,
         };
-
-        let mut extensions = serde_json::Map::new();
-        if let Some(gtid) = last_gtid {
-            extensions.insert("gtid".into(), serde_json::Value::String(gtid.clone()));
-        }
-        if !gtid_set.is_empty() {
-            extensions.insert(
-                "gtidset".into(),
-                serde_json::Value::String(gtid_set.clone()),
-            );
-        }
-
-        let event = CloudEvent::row_change(source_id, &tm.table, op, data, extensions);
-        // Bounded queue: blocks here when sink is slow (do not drop).
-        tx.blocking_send(Ok(StreamMsg::Event {
-            event,
-            gtid_set: gtid_set.clone(),
-        }))
-        .map_err(|_| "event channel closed".to_string())?;
-        emitted += 1;
-    }
-
-    if emitted == 0 && !gtid_set.is_empty() {
-        tx.blocking_send(Ok(StreamMsg::Advance { gtid_set }))
-            .map_err(|_| "event channel closed".to_string())?;
+        dispatch_binlog_event(&mut ctx, data)?;
     }
 
     Ok(())
@@ -438,4 +347,11 @@ impl CheckpointStore for FileCheckpointStore {
         tokio::fs::write(&self.path, bytes).await?;
         Ok(())
     }
+}
+
+#[doc(hidden)]
+pub mod test_support {
+    pub use crate::binlog_dispatch::{
+        dispatch_binlog_event_for_test as dispatch, BinlogDispatchCtx, TableMap,
+    };
 }

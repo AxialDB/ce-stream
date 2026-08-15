@@ -2,10 +2,16 @@
 **/*.rs.bk
 .ce-stream/
 ce-stream.toml
+ce-stream-crash-test.toml
 .idea/
 .vscode/
 *.swp
 scripts/perf/out/
+scripts/crash-harness/mysql/out/
+releases/staging/
+releases/staging/
+releases/dist/
+.release-ci/
 
 # Do not ship upstream example env (sample credentials)
 vendor/mysql-binlog-connector-rust/example/src/.env

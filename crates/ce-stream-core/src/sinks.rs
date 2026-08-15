@@ -3,9 +3,13 @@
 use async_trait::async_trait;
 use tracing::{debug, info};
 
-use crate::avro_encode::{self, CONTENT_TYPE_AVRO, SCHEMA_ID};
+use crate::avro_encode::{
+    self, COMMITTED_TRANSACTION_SCHEMA_ID, CONTENT_TYPE_AVRO, CONTENT_TYPE_COMMITTED_TXN_AVRO,
+    SCHEMA_ID,
+};
 use crate::error::{Error, Result};
 use crate::event::{CloudEvent, SinkFormat};
+use crate::transaction::CommittedTransaction;
 use crate::Sink;
 
 pub struct StdoutSink {
@@ -79,6 +83,61 @@ impl HttpSink {
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
+    }
+
+    /// POST a JSON body (e.g. [`CommittedTransaction`] in transaction delivery mode).
+    pub async fn post_json<T: serde::Serialize>(&self, body: &T) -> Result<()> {
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .json(body);
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let resp = req.send().await.map_err(|e| Error::Sink(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Sink(format!(
+                "HTTP {status} from {}: {}",
+                self.url,
+                truncate(&text, 200)
+            )));
+        }
+        debug!(%status, url = %self.url, "http json post ok");
+        Ok(())
+    }
+
+    /// POST one committed transaction envelope (JSON or Avro depending on sink format).
+    pub async fn post_committed_transaction(&self, txn: &CommittedTransaction) -> Result<()> {
+        match self.format {
+            SinkFormat::Json => self.post_json(txn).await,
+            SinkFormat::Avro => {
+                let body = avro_encode::encode_committed_transaction(txn)?;
+                let mut req = self
+                    .client
+                    .post(&self.url)
+                    .header("content-type", CONTENT_TYPE_COMMITTED_TXN_AVRO)
+                    .header("x-ce-stream-avro-schema", COMMITTED_TRANSACTION_SCHEMA_ID)
+                    .body(body);
+                for (k, v) in &self.headers {
+                    req = req.header(k, v);
+                }
+                let resp = req.send().await.map_err(|e| Error::Sink(e.to_string()))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(Error::Sink(format!(
+                        "HTTP {status} from {}: {}",
+                        self.url,
+                        truncate(&text, 200)
+                    )));
+                }
+                debug!(%status, url = %self.url, gtid = %txn.gtid, "http committed transaction avro post ok");
+                Ok(())
+            }
+        }
     }
 }
 

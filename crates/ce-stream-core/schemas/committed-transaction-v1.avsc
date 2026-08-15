@@ -1,0 +1,52 @@
+{
+  "type": "record",
+  "name": "CommittedTransaction",
+  "namespace": "io.ce_stream",
+  "doc": "ce-stream committed MySQL transaction envelope. Field order matches Rust CommittedTransaction. Schema id: ce-stream.committed-transaction.v1",
+  "fields": [
+    { "name": "gtid", "type": "string" },
+    { "name": "gtid_set_after", "type": "string" },
+    {
+      "name": "ddl",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "DdlStatement",
+          "fields": [
+            { "name": "schema", "type": "string" },
+            { "name": "query", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "events",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "CloudEvent",
+          "fields": [
+            { "name": "specversion", "type": "string" },
+            { "name": "id", "type": "string" },
+            { "name": "type", "type": "string" },
+            { "name": "source", "type": "string" },
+            { "name": "subject", "type": "string" },
+            { "name": "time", "type": "string" },
+            {
+              "name": "extensions_json",
+              "type": "string",
+              "doc": "JSON object of CloudEvents extension attributes"
+            },
+            {
+              "name": "data_json",
+              "type": "string",
+              "doc": "JSON value of CloudEvent data"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

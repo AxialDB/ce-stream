@@ -570,8 +570,9 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "ce-stream-core",
  "ce-stream-mysql",
  "chrono",
@@ -587,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "async-trait",
@@ -603,11 +604,12 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-mysql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-std",
  "async-trait",
  "ce-stream-core",
+ "chrono",
  "mysql-binlog-connector-rust",
  "percent-encoding",
  "serde",
@@ -616,11 +618,12 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
 name = "ce-stream-perf-sink"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -633,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-spike"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-std",
  "clap",

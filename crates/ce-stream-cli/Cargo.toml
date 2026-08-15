@@ -13,6 +13,7 @@ name = "ce-stream"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 ce-stream-core = { workspace = true }
 ce-stream-mysql = { workspace = true }
 chrono = { workspace = true }

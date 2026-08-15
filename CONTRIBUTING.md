@@ -21,12 +21,14 @@ Requirements: Rust stable (see `rust-version` in workspace `Cargo.toml`), MySQL 
 ```powershell
 cargo fmt --all
 cargo clippy -p ce-stream-core -p ce-stream-mysql -p ce-stream-cli -p ce-stream-perf-sink --no-deps -- -D warnings
-cargo test -p ce-stream-core -p ce-stream-mysql --lib
+cargo test -p ce-stream-core -p ce-stream-mysql
 ```
 
 Copy `ce-stream.toml.example` → `ce-stream.toml` for local runs (gitignored). Do not commit secrets.
 
-Default CI does **not** start MySQL. Lab/E2E scripts under `scripts/` are optional and need your own MySQL 9.x.
+Default CI does **not** start MySQL and does **not** run the crash harness. Lab scripts under `scripts/crash-harness/` and `scripts/e2e-http.ps1` need your own MySQL 9.x.
+
+Release binaries (Linux + Windows) are built by `.github/workflows/release.yml` with no database.
 
 ## Pull requests
 
