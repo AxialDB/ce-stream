@@ -96,7 +96,11 @@ fn max_transaction_id(gtid_set: &str) -> Result<Option<(String, u64)>> {
     for uuid_set in set.get_uuid_sets() {
         for interval in &uuid_set.intervals {
             let candidate = (uuid_set.uuid.clone(), interval.end);
-            if best.as_ref().is_none_or(|(_, end)| interval.end > *end) {
+            let better = match best.as_ref() {
+                None => true,
+                Some((_, end)) => interval.end > *end,
+            };
+            if better {
                 best = Some(candidate);
             }
         }

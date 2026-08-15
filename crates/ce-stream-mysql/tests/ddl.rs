@@ -7,7 +7,7 @@ use ce_stream_core::event::PayloadMode;
 use ce_stream_core::DeliveryUnit;
 use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
 use ce_stream_mysql::DDL_CE_TYPE;
-use ce_stream_mysql::{deliver_committed, ExecutedSet, TxnBuffer};
+use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -132,16 +132,21 @@ fn row_mode_one_ddl_ce_then_three_row_ces() {
 
     let commit = rx.try_recv().unwrap().unwrap();
     let mut types = Vec::new();
+    let mut executed = ExecutedSet::default();
+    let mut checkpoint_store = None;
+    let mut checkpoint = None;
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async {
             deliver_committed(
                 commit,
-                "mysql://test",
-                DeliveryUnit::Row,
-                &mut ExecutedSet::default(),
-                &mut None,
-                &mut None,
+                &mut DeliverCtx {
+                    source_id: "mysql://test",
+                    delivery_unit: DeliveryUnit::Row,
+                    executed: &mut executed,
+                    checkpoint_store: &mut checkpoint_store,
+                    checkpoint: &mut checkpoint,
+                },
                 &mut |ev| {
                     types.push(ev.ty.clone());
                     Ok(())

@@ -25,7 +25,7 @@ use ce_stream_core::{
 use tracing::info;
 
 pub use ddl::DDL_CE_TYPE;
-pub use dispatch::deliver_committed;
+pub use dispatch::{deliver_committed, DeliverCtx};
 pub use gate::{validate_capture_gates, GateReport};
 pub use gtid::ExecutedSet;
 pub use map::column_value_to_json;
@@ -203,11 +203,13 @@ impl MysqlBinlogSource {
                         let mut shared = executed.lock().await;
                         deliver_committed(
                             txn,
-                            &source_id_delivery,
-                            delivery_unit,
-                            &mut shared,
-                            &mut self.checkpoint_store,
-                            &mut self.checkpoint,
+                            &mut DeliverCtx {
+                                source_id: &source_id_delivery,
+                                delivery_unit,
+                                executed: &mut shared,
+                                checkpoint_store: &mut self.checkpoint_store,
+                                checkpoint: &mut self.checkpoint,
+                            },
                             &mut on_row,
                             &mut on_txn,
                         )

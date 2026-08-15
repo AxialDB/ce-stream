@@ -8,7 +8,7 @@ use ce_stream_core::event::{ChangeOp, PayloadMode, TableRef};
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
 use ce_stream_core::{Checkpoint, CheckpointStore, CloudEvent, DeliveryUnit};
 use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
-use ce_stream_mysql::{deliver_committed, ExecutedSet, TxnBuffer};
+use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -164,17 +164,22 @@ fn dispatch_three_row_callbacks_after_xid_in_row_mode() {
 
     let commit = rx.try_recv().unwrap().unwrap();
     let delivered = Cell::new(0u32);
+    let mut executed = ExecutedSet::default();
+    let mut checkpoint_store = None;
+    let mut checkpoint = None;
 
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async {
             deliver_committed(
                 commit,
-                "mysql://test",
-                DeliveryUnit::Row,
-                &mut ExecutedSet::default(),
-                &mut None,
-                &mut None,
+                &mut DeliverCtx {
+                    source_id: "mysql://test",
+                    delivery_unit: DeliveryUnit::Row,
+                    executed: &mut executed,
+                    checkpoint_store: &mut checkpoint_store,
+                    checkpoint: &mut checkpoint,
+                },
                 &mut |_| {
                     delivered.set(delivered.get() + 1);
                     Ok(())
@@ -310,11 +315,13 @@ async fn one_checkpoint_after_full_txn_ack_row_mode() {
 
     deliver_committed(
         make_txn("abc:1", 3),
-        "mysql://test",
-        DeliveryUnit::Row,
-        &mut executed,
-        &mut checkpoint_store,
-        &mut checkpoint,
+        &mut DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit: DeliveryUnit::Row,
+            executed: &mut executed,
+            checkpoint_store: &mut checkpoint_store,
+            checkpoint: &mut checkpoint,
+        },
         &mut |_| {
             delivered.set(delivered.get() + 1);
             Ok(())
@@ -342,11 +349,13 @@ async fn row_mode_avro_after_commit_one_checkpoint() {
 
     deliver_committed(
         make_txn("abc:1", 3),
-        "mysql://test",
-        DeliveryUnit::Row,
-        &mut executed,
-        &mut checkpoint_store,
-        &mut checkpoint,
+        &mut DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit: DeliveryUnit::Row,
+            executed: &mut executed,
+            checkpoint_store: &mut checkpoint_store,
+            checkpoint: &mut checkpoint,
+        },
         &mut |ev| {
             let bytes = avro_encode::encode_cloudevent(&ev)?;
             assert!(!bytes.is_empty());
@@ -369,14 +378,19 @@ async fn row_mode_avro_after_commit_one_checkpoint() {
 #[tokio::test]
 async fn transaction_mode_one_envelope_per_commit() {
     let mut received: Option<CommittedTransaction> = None;
+    let mut executed = ExecutedSet::default();
+    let mut checkpoint_store = None;
+    let mut checkpoint = None;
 
     deliver_committed(
         make_txn("abc:1", 3),
-        "mysql://test",
-        DeliveryUnit::Transaction,
-        &mut ExecutedSet::default(),
-        &mut None,
-        &mut None,
+        &mut DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit: DeliveryUnit::Transaction,
+            executed: &mut executed,
+            checkpoint_store: &mut checkpoint_store,
+            checkpoint: &mut checkpoint,
+        },
         &mut |_| panic!("row callback must not run in transaction mode"),
         &mut |txn| {
             received = Some(txn);
@@ -412,11 +426,13 @@ async fn ddl_in_commit_row_mode() {
             }],
             events: make_txn("abc:1", 3).events,
         },
-        "mysql://test",
-        DeliveryUnit::Row,
-        &mut executed,
-        &mut checkpoint_store,
-        &mut checkpoint,
+        &mut DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit: DeliveryUnit::Row,
+            executed: &mut executed,
+            checkpoint_store: &mut checkpoint_store,
+            checkpoint: &mut checkpoint,
+        },
         &mut |ev| {
             types.push(ev.ty.clone());
             Ok(())
@@ -444,11 +460,13 @@ async fn crash_mid_fanout_does_not_checkpoint() {
 
     let err = deliver_committed(
         make_txn("abc:1", 3),
-        "mysql://test",
-        DeliveryUnit::Row,
-        &mut executed,
-        &mut checkpoint_store,
-        &mut checkpoint,
+        &mut DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit: DeliveryUnit::Row,
+            executed: &mut executed,
+            checkpoint_store: &mut checkpoint_store,
+            checkpoint: &mut checkpoint,
+        },
         &mut |_| {
             delivered.set(delivered.get() + 1);
             if delivered.get() == 1 {
@@ -484,11 +502,13 @@ async fn empty_commit_still_advances_watermark() {
             ddl: vec![],
             events: vec![],
         },
-        "mysql://test",
-        DeliveryUnit::Row,
-        &mut executed,
-        &mut checkpoint_store,
-        &mut checkpoint,
+        &mut DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit: DeliveryUnit::Row,
+            executed: &mut executed,
+            checkpoint_store: &mut checkpoint_store,
+            checkpoint: &mut checkpoint,
+        },
         &mut |_| Ok(()),
         &mut |_| Ok(()),
     )
@@ -544,11 +564,13 @@ fn all_filtered_commit_still_checkpoints() {
         .block_on(async {
             deliver_committed(
                 commit,
-                "mysql://test",
-                DeliveryUnit::Row,
-                &mut executed,
-                &mut checkpoint_store,
-                &mut checkpoint,
+                &mut DeliverCtx {
+                    source_id: "mysql://test",
+                    delivery_unit: DeliveryUnit::Row,
+                    executed: &mut executed,
+                    checkpoint_store: &mut checkpoint_store,
+                    checkpoint: &mut checkpoint,
+                },
                 &mut |_| Ok(()),
                 &mut |_| Ok(()),
             )

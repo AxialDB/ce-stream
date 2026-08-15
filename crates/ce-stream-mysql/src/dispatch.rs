@@ -7,14 +7,19 @@ use ce_stream_core::{Checkpoint, CheckpointStore, CloudEvent, DeliveryUnit};
 use crate::ddl;
 use crate::gtid::ExecutedSet;
 
+/// Mutable capture state used while delivering one committed transaction.
+pub struct DeliverCtx<'a> {
+    pub source_id: &'a str,
+    pub delivery_unit: DeliveryUnit,
+    pub executed: &'a mut ExecutedSet,
+    pub checkpoint_store: &'a mut Option<Box<dyn CheckpointStore>>,
+    pub checkpoint: &'a mut Option<Checkpoint>,
+}
+
 /// Deliver one committed transaction and persist checkpoint on full success.
 pub async fn deliver_committed<F, G>(
     txn: CommittedTransaction,
-    source_id: &str,
-    delivery_unit: DeliveryUnit,
-    executed: &mut ExecutedSet,
-    checkpoint_store: &mut Option<Box<dyn CheckpointStore>>,
-    checkpoint: &mut Option<Checkpoint>,
+    ctx: &mut DeliverCtx<'_>,
     on_row: &mut F,
     on_txn: &mut G,
 ) -> Result<()>
@@ -24,11 +29,11 @@ where
 {
     let gtid = txn.gtid.clone();
     let gtid_set_after = txn.gtid_set_after.clone();
-    match delivery_unit {
+    match ctx.delivery_unit {
         DeliveryUnit::Row => {
             for stmt in &txn.ddl {
                 on_row(ddl::ddl_cloud_event(
-                    source_id,
+                    ctx.source_id,
                     stmt,
                     &gtid,
                     &gtid_set_after,
@@ -41,8 +46,13 @@ where
         DeliveryUnit::Transaction => on_txn(txn)?,
     }
 
-    executed.add_committed(&gtid)?;
-    persist_gtid_set(executed.to_set_string(), checkpoint_store, checkpoint).await
+    ctx.executed.add_committed(&gtid)?;
+    persist_gtid_set(
+        ctx.executed.to_set_string(),
+        ctx.checkpoint_store,
+        ctx.checkpoint,
+    )
+    .await
 }
 
 async fn persist_gtid_set(
@@ -95,6 +105,21 @@ mod tests {
         }
     }
 
+    fn deliver_ctx<'a>(
+        executed: &'a mut ExecutedSet,
+        checkpoint_store: &'a mut Option<Box<dyn CheckpointStore>>,
+        checkpoint: &'a mut Option<Checkpoint>,
+        delivery_unit: DeliveryUnit,
+    ) -> DeliverCtx<'a> {
+        DeliverCtx {
+            source_id: "mysql://test",
+            delivery_unit,
+            executed,
+            checkpoint_store,
+            checkpoint,
+        }
+    }
+
     fn sample_txn(gtid: &str, rows: u32) -> CommittedTransaction {
         let events: Vec<_> = (0..rows)
             .map(|_| {
@@ -128,11 +153,12 @@ mod tests {
         let txn = sample_txn("abc:1", 3);
         deliver_committed(
             txn,
-            "mysql://test",
-            DeliveryUnit::Row,
-            &mut executed,
-            &mut checkpoint_store,
-            &mut checkpoint,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Row,
+            ),
             &mut |_| {
                 calls.set(calls.get() + 1);
                 Ok(())
@@ -166,11 +192,12 @@ mod tests {
         let txn = sample_txn("abc:1", 3);
         let err = deliver_committed(
             txn,
-            "mysql://test",
-            DeliveryUnit::Row,
-            &mut executed,
-            &mut checkpoint_store,
-            &mut checkpoint,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Row,
+            ),
             &mut |_| {
                 calls.set(calls.get() + 1);
                 if calls.get() == 2 {
@@ -208,11 +235,12 @@ mod tests {
 
         deliver_committed(
             txn,
-            "mysql://test",
-            DeliveryUnit::Row,
-            &mut executed,
-            &mut checkpoint_store,
-            &mut checkpoint,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Row,
+            ),
             &mut |ev| {
                 types.push(ev.ty.clone());
                 Ok(())
@@ -248,11 +276,12 @@ mod tests {
                 }],
                 events: vec![],
             },
-            "mysql://test",
-            DeliveryUnit::Row,
-            &mut executed,
-            &mut checkpoint_store,
-            &mut checkpoint,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Row,
+            ),
             &mut |ev| {
                 count += 1;
                 assert_eq!(ev.ty, crate::ddl::DDL_CE_TYPE);
@@ -286,11 +315,12 @@ mod tests {
                 }],
                 events: sample_txn("abc:1", 3).events,
             },
-            "mysql://test",
-            DeliveryUnit::Transaction,
-            &mut executed,
-            &mut checkpoint_store,
-            &mut checkpoint,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Transaction,
+            ),
             &mut |_| Ok(()),
             &mut |txn| {
                 received = Some(txn);

@@ -317,7 +317,7 @@ fn log_row_health(n: u64, ev: &CloudEvent, started: &Instant) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let lag_ms = event_lag_ms(ev);
-    if n == 1 || n.is_multiple_of(100) {
+    if n == 1 || n % 100 == 0 {
         tracing::info!(
             target: "ce_stream::health",
             events_total = n,
