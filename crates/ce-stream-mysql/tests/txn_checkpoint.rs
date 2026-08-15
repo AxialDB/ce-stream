@@ -359,7 +359,11 @@ async fn row_mode_avro_after_commit_one_checkpoint() {
     .unwrap();
 
     assert_eq!(encoded.get(), 3, "one Avro encode per row after commit");
-    assert_eq!(*saves.lock().unwrap(), 1, "single checkpoint after all encodes");
+    assert_eq!(
+        *saves.lock().unwrap(),
+        1,
+        "single checkpoint after all encodes"
+    );
 }
 
 #[tokio::test]

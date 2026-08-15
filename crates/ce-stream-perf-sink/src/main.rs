@@ -80,7 +80,11 @@ async fn main() {
 async fn events(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
     let seen = state.received.load(Ordering::SeqCst);
     if state.stall_after > 0 && seen >= state.stall_after {
-        tracing::info!(seen, stall_after = state.stall_after, "stalling POST for crash harness");
+        tracing::info!(
+            seen,
+            stall_after = state.stall_after,
+            "stalling POST for crash harness"
+        );
         std::future::pending::<()>().await;
     }
     if !state.delay.is_zero() {

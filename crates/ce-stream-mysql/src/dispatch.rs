@@ -224,7 +224,9 @@ mod tests {
 
         assert_eq!(types.len(), 4);
         assert_eq!(types[0], crate::ddl::DDL_CE_TYPE);
-        assert!(types[1..].iter().all(|t| t.starts_with("io.ce-stream.row.")));
+        assert!(types[1..]
+            .iter()
+            .all(|t| t.starts_with("io.ce-stream.row.")));
     }
 
     #[tokio::test]

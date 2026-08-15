@@ -24,7 +24,12 @@ const GATE_VARIABLES: &[&str] = &[
 pub fn evaluate_gate_variables(vars: &HashMap<String, String>) -> Result<GateReport> {
     let mut report = GateReport::default();
 
-    require_value(vars, "binlog_format", &["ROW"], "SET GLOBAL binlog_format = 'ROW';")?;
+    require_value(
+        vars,
+        "binlog_format",
+        &["ROW"],
+        "SET GLOBAL binlog_format = 'ROW';",
+    )?;
     require_value(
         vars,
         "binlog_row_image",
@@ -44,9 +49,9 @@ pub fn evaluate_gate_variables(vars: &HashMap<String, String>) -> Result<GateRep
         Some(value) => report.warnings.push(format!(
             "enforce_gtid_consistency={value} (recommended ON for safe GTID capture)"
         )),
-        None => report.warnings.push(
-            "enforce_gtid_consistency not reported (recommended ON)".into(),
-        ),
+        None => report
+            .warnings
+            .push("enforce_gtid_consistency not reported (recommended ON)".into()),
     }
 
     Ok(report)

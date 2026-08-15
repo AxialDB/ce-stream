@@ -166,9 +166,12 @@ mod tests {
     #[test]
     fn legacy_handshake_fills_through_checkpoint_high_water() {
         let uuid = "49b103aa-6814-11f1-aab9-144fd7d9c421";
-        let out =
-            ExecutedSet::binlog_handshake_gtid_set(&format!("{uuid}:4105-4105"), None, &format!("{uuid}:1-242"))
-                .unwrap();
+        let out = ExecutedSet::binlog_handshake_gtid_set(
+            &format!("{uuid}:4105-4105"),
+            None,
+            &format!("{uuid}:1-242"),
+        )
+        .unwrap();
         assert_eq!(out, format!("{uuid}:1-4105"));
     }
 

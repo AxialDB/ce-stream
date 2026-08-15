@@ -117,8 +117,7 @@ fn ddl_from_record(fields: &[(String, Value)]) -> Result<DdlStatement> {
 /// Encode a CloudEvent as a single Avro binary datum.
 pub fn encode_cloudevent(event: &CloudEvent) -> Result<Vec<u8>> {
     let value = cloud_event_to_value(event)?;
-    to_avro_datum(cloudevent_schema(), value)
-        .map_err(|e| Error::Sink(format!("avro encode: {e}")))
+    to_avro_datum(cloudevent_schema(), value).map_err(|e| Error::Sink(format!("avro encode: {e}")))
 }
 
 /// Decode a single Avro datum back to a CloudEvent (tests / consumers).

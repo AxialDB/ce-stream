@@ -18,7 +18,11 @@ pub fn is_ddl_query(query: &str) -> bool {
 
 /// Transaction control statements that carry no delivery payload.
 pub fn is_ignored_transaction_query(query: &str) -> bool {
-    let q = query.trim().trim_end_matches(';').trim().to_ascii_uppercase();
+    let q = query
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_ascii_uppercase();
     matches!(q.as_str(), "BEGIN" | "COMMIT" | "ROLLBACK")
 }
 

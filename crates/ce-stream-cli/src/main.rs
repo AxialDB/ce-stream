@@ -301,10 +301,7 @@ fn emit_transaction(
             }
             SinkFormat::Avro => {
                 let bytes = ce_stream_core::avro_encode::encode_committed_transaction(txn)?;
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    bytes,
-                );
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
                 println!("{b64}");
                 Ok(())
             }

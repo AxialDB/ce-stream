@@ -24,8 +24,8 @@ use ce_stream_core::{
 };
 use tracing::info;
 
-pub use dispatch::deliver_committed;
 pub use ddl::DDL_CE_TYPE;
+pub use dispatch::deliver_committed;
 pub use gate::{validate_capture_gates, GateReport};
 pub use gtid::ExecutedSet;
 pub use map::column_value_to_json;
@@ -124,8 +124,7 @@ impl MysqlBinlogSource {
         let baseline = cp.payload.get("baseline_gtid").and_then(|v| v.as_str());
         let url = self.options.connection_url();
         let purged = gate::fetch_global_gtid(&url, "gtid_purged").await?;
-        let handshake =
-            ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)?;
+        let handshake = ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)?;
         info!(handshake_gtid = %handshake, "resuming binlog from checkpoint");
         Ok(StartPosition::Gtid(handshake))
     }

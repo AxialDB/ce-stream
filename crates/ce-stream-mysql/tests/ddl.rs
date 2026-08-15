@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use ce_stream_core::event::PayloadMode;
 use ce_stream_core::DeliveryUnit;
-use ce_stream_mysql::DDL_CE_TYPE;
 use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
+use ce_stream_mysql::DDL_CE_TYPE;
 use ce_stream_mysql::{deliver_committed, ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
@@ -80,11 +80,7 @@ fn ddl_buffered_then_commit_includes_ddl_and_rows() {
     )
     .unwrap();
     dispatch(&mut ctx, EventData::TableMap(table_map())).unwrap();
-    dispatch(
-        &mut ctx,
-        EventData::WriteRows(write_rows(3)),
-    )
-    .unwrap();
+    dispatch(&mut ctx, EventData::WriteRows(write_rows(3))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
     let commit = rx.try_recv().unwrap().unwrap();
