@@ -54,8 +54,8 @@ SHOW BINARY LOG STATUS;
 ## Re-run
 
 ```powershell
-# Apply scripts/spike-setup.sql once (edit password), then:
-$env:CE_STREAM_PASSWORD = "your-password"
+# Apply scripts/spike-setup.sql once (set CE_STREAM_PASSWORD, then substitute via -SetupLab or manual edit), then:
+$env:CE_STREAM_PASSWORD = "<your ce_stream password>"
 .\scripts\run-spike.ps1
 
 # In another shell, generate DML while the spike waits, e.g.:

@@ -1,0 +1,134 @@
+# Build GitHub Release binaries. No MySQL, no crash harness, no live capture.
+#
+# - pull_request: compile + package Windows and Linux (CI proof; no GitHub Release)
+# - push tag v*:  same builds, then attach archives + SHA256SUMS to the GitHub Release
+#
+# Linux (ubuntu-latest) and Windows (windows-latest) are equal first-class targets.
+
+name: Release
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            pack: gztar
+            bin_ext: ""
+          - name: Windows x86_64
+            os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            pack: zip
+            bin_ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      - name: cargo build --release
+        run: cargo build -p ce-stream-cli -p ce-stream-perf-sink --release --locked
+
+      - name: Smoke --help
+        shell: bash
+        run: |
+          set -euo pipefail
+          "./target/release/ce-stream${{ matrix.bin_ext }}" --help
+          "./target/release/ce-stream-perf-sink${{ matrix.bin_ext }}" --help
+
+      - name: Package archive
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="ci-${GITHUB_SHA::7}"
+          fi
+          STAGING="${GITHUB_WORKSPACE}/.release-ci/staging"
+          DIST="${GITHUB_WORKSPACE}/.release-ci/dist"
+          rm -rf "${STAGING}" "${DIST}"
+          mkdir -p "${STAGING}" "${DIST}"
+          cp "target/release/ce-stream${{ matrix.bin_ext }}" "${STAGING}/"
+          cp "target/release/ce-stream-perf-sink${{ matrix.bin_ext }}" "${STAGING}/"
+          {
+            echo "ce-stream v${VER}"
+            echo "target: ${{ matrix.triple }}"
+            echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${STAGING}/VERSION"
+          BASE="${DIST}/ce-stream-v${VER}-${{ matrix.triple }}"
+          PY=python3
+          if ! command -v python3 >/dev/null 2>&1; then
+            PY=python
+          fi
+          "$PY" -c "import shutil,sys; shutil.make_archive(sys.argv[1], sys.argv[2], sys.argv[3])" \
+            "${BASE}" "${{ matrix.pack }}" "${STAGING}"
+          echo "version=${VER}" >> "${GITHUB_OUTPUT}"
+          echo "dist=${DIST}" >> "${GITHUB_OUTPUT}"
+          ls -la "${DIST}"
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.triple }}
+          path: ${{ steps.pkg.outputs.dist }}/*
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum ce-stream-v*.zip ce-stream-v*.tar.gz | tee SHA256SUMS
+          ls -la
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          files: |
+            dist/*
+          fail_on_unmatched_files: true
+          draft: false
+          make_latest: true

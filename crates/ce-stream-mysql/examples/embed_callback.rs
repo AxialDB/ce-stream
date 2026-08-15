@@ -36,9 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             include_tables: vec![TableRef::new(db, tbl)],
             payload_mode: Default::default(),
             queue_capacity: 64,
+            delivery_unit: Default::default(),
         },
         checkpoint: None,
         checkpoint_store: None,
+        skip_gate_check: true,
     };
 
     let mut n = 0u32;
