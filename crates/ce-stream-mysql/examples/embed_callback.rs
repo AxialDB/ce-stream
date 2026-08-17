@@ -41,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         checkpoint: None,
         checkpoint_store: None,
         skip_gate_check: true,
+        include: Default::default(),
     };
 
     let mut n = 0u32;

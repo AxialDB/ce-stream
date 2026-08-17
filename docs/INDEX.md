@@ -6,8 +6,10 @@
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Contributors | Bugs, PRs, Discussions |
 | [`../SECURITY.md`](../SECURITY.md) | Security reports | Private advisory path |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Everyone | Release notes |
-| [`releases/v0.2.0.md`](releases/v0.2.0.md) | Everyone | **v0.2.0** release notes (Gate 0) |
+| [`releases/v0.3.0.md`](releases/v0.3.0.md) | Everyone | **v0.3.0** release notes (live include list) |
+| [`releases/v0.2.0.md`](releases/v0.2.0.md) | Everyone | v0.2.0 release notes (Gate 0) |
 | [`releasing.md`](releasing.md) | Maintainers | Tag + GitHub Release workflow |
+| [`issues/3.md`](issues/3.md) | Maintainers | Live include list (closes #3) |
 | [`issues/1.md`](issues/1.md) | Maintainers | Gate 0 plan (closes #1) |
 | [`planning.md`](planning.md) | Maintainers | Phase status; Phase 6 multi-DB **deferred** |
 | [`oss-readiness.md`](oss-readiness.md) | Maintainers | Lean OSS MVP (historical plan; see releasing.md for v0.2) |

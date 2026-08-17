@@ -1,6 +1,6 @@
 //! Binlog event routing, including compressed [`EventData::TransactionPayload`] unpack.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ce_stream_core::event::{ChangeOp, CloudEvent, PayloadMode, TableRef};
@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 
 use crate::ddl;
 use crate::gtid::ExecutedSet;
+use crate::include::IncludeList;
 use crate::map;
 use crate::txn_buffer::TxnBuffer;
 
@@ -27,7 +28,7 @@ pub struct BinlogDispatchCtx<'a> {
     pub executed: &'a Arc<Mutex<ExecutedSet>>,
     pub tables: &'a mut HashMap<u64, TableMap>,
     pub source_id: &'a str,
-    pub include: &'a HashSet<String>,
+    pub include: &'a IncludeList,
     pub payload_mode: PayloadMode,
     pub tx: &'a mpsc::Sender<std::result::Result<CommittedTransaction, String>>,
 }
@@ -39,6 +40,7 @@ pub(crate) fn dispatch_binlog_event(
 ) -> std::result::Result<(), String> {
     match data {
         EventData::Gtid(g) => {
+            ctx.txn.set_include(ctx.include.snapshot_filter());
             ctx.txn.on_gtid(g.gtid);
         }
         EventData::TableMap(tm) => apply_table_map(ctx.tables, tm),
@@ -171,7 +173,7 @@ where
     };
 
     let subject = tm.table.as_subject();
-    if !ctx.include.is_empty() && !ctx.include.contains(&subject) {
+    if !ctx.txn.allows(&subject) {
         return Ok(());
     }
 

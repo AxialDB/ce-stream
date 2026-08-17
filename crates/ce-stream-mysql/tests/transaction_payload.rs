@@ -1,11 +1,11 @@
 //! Compressed transaction (`TransactionPayload`) dispatch tests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ce_stream_core::event::PayloadMode;
 use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx, TableMap};
-use ce_stream_mysql::{ExecutedSet, TxnBuffer};
+use ce_stream_mysql::{ExecutedSet, IncludeList, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::event_header::EventHeader;
@@ -66,8 +66,7 @@ fn compressed_txn_payload(row_count: usize) -> EventData {
 
 #[test]
 fn transaction_payload_unpack_produces_one_commit() {
-    let mut include = HashSet::new();
-    include.insert("demo.orders".into());
+    let include = IncludeList::from_subjects(["demo.orders"]);
 
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
@@ -109,7 +108,7 @@ fn transaction_payload_unpack_produces_one_commit() {
 
 #[test]
 fn transaction_payload_includes_ddl_query() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -176,7 +175,7 @@ fn transaction_payload_includes_ddl_query() {
 
 #[test]
 fn empty_transaction_payload_fails() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, _rx) = mpsc::channel(1);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();

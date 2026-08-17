@@ -7,14 +7,14 @@ The CLI is a thin host. Embed capture in your own process with the same single o
 ## Crates
 
 - `ce-stream-core` - `CloudEvent`, `CommittedTransaction`, `ChangeSource`, `Sink`, `CheckpointStore`
-- `ce-stream-mysql` - `MysqlBinlogSource`, `FileCheckpointStore`, `validate_capture_gates`
+- `ce-stream-mysql` - `MysqlBinlogSource`, `IncludeList`, `FileCheckpointStore`, `validate_capture_gates`
 
 ## Minimal callback (row mode, in-process push)
 
 ```rust
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
 use ce_stream_core::event::TableRef;
-use ce_stream_mysql::{MysqlBinlogSource, MysqlSourceOptions};
+use ce_stream_mysql::{IncludeList, MysqlBinlogSource, MysqlSourceOptions};
 
 // inside an async fn on a tokio runtime:
 let mut source = MysqlBinlogSource {
@@ -36,6 +36,7 @@ let mut source = MysqlBinlogSource {
     checkpoint: None,
     checkpoint_store: None, // or Some(Box::new(FileCheckpointStore { ... }))
     skip_gate_check: false,
+    include: IncludeList::new(), // seeded from include_tables at run() unless mutated
 };
 
 source
@@ -65,6 +66,26 @@ source
 ```
 
 Row mode and transaction mode share the same commit-boundary buffering — nothing is emitted before XID.
+
+## Live include list
+
+Clone the handle **before** `run` / `run_transactions` (or keep `source.include.clone()` on the same struct if you do not move it). Updates do **not** end the dump thread.
+
+```rust
+let handle = source.include_handle();
+
+handle.insert(TableRef::new("demo_perf", "items"));
+handle.remove(&TableRef::new("demo_perf", "orders"));
+handle.replace([TableRef::new("demo_perf", "items")]);
+```
+
+- **When it applies:** next GTID (start of the next transaction). Best-effort; **no ack**.
+- Mid-transaction updates never split the current envelope.
+- Fully filtered commits are still delivered so the GTID watermark advances.
+- Empty `include_tables` at start still means all tables. After start, removing the last table or `replace([])` means no row events.
+- DDL Query events are not filtered by this list.
+
+Restarting capture with a new `config.include_tables` still works (v0.2.0 workaround).
 
 ## Capture gates
 

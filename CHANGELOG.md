@@ -7,6 +7,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-17
+
+Live include-list updates on a running capture session ([issue #3](https://github.com/ce-stream/ce-stream/issues/3)).
+Release notes: [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md).
+
+### Added
+
+- `IncludeList` handle on `MysqlBinlogSource` (`include` / `include_handle()`): add, remove, or replace `database.table` entries without ending the binlog dump thread.
+- Include snapshot is taken at **GTID** (start of the next transaction). Mid-envelope updates never split a commit.
+- Unit tests: `include_live` (add/remove/replace, mid-txn freeze, empty commit after last-table remove, DDL still unfiltered).
+
+### Changed
+
+- **Breaking (struct literals):** `MysqlBinlogSource` has a new field `include: IncludeList`. Existing literals need `include: Default::default()` (capture start still seeds from `config.include_tables` if the handle was never mutated).
+
+### Notes
+
+- Change is **best-effort** from the next GTID. There is no ack.
+- Empty `include_tables` at start still means all tables. After start, removing the last table or `replace([])` means no row events; empty commits still advance the GTID watermark.
+- DDL Query events are not filtered by the include list (same as v0.2.0).
+
 ## [0.2.0] - 2026-08-15
 
 Gate 0 transaction-boundary capture ([issue #1](https://github.com/ce-stream/ce-stream/issues/1)).
@@ -60,7 +81,8 @@ Release notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md).
 - Other database engines (Phase 6 parked).
 - Schema Registry / typed per-table Avro.
 
-[Unreleased]: https://github.com/ce-stream/ce-stream/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ce-stream/ce-stream/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ce-stream/ce-stream/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ce-stream/ce-stream/releases/tag/v0.2.0
 [0.1.1]: https://github.com/ce-stream/ce-stream/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ce-stream/ce-stream/releases/tag/v0.1.0

@@ -205,6 +205,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         checkpoint,
         checkpoint_store: Some(Box::new(store)),
         skip_gate_check: args.skip_gate_check,
+        include: Default::default(),
     };
 
     let emitted = Arc::new(AtomicU64::new(0));
