@@ -5,10 +5,11 @@ mod ddl;
 mod dispatch;
 mod gate;
 mod gtid;
+mod include;
 mod map;
 mod txn_buffer;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,7 @@ pub use ddl::DDL_CE_TYPE;
 pub use dispatch::{deliver_committed, DeliverCtx};
 pub use gate::{validate_capture_gates, GateReport};
 pub use gtid::ExecutedSet;
+pub use include::IncludeList;
 pub use map::column_value_to_json;
 pub use txn_buffer::TxnBuffer;
 
@@ -66,15 +68,18 @@ pub struct MysqlBinlogSource {
     pub checkpoint_store: Option<Box<dyn CheckpointStore>>,
     /// Skip [`validate_capture_gates`] (lab escape hatch only).
     pub skip_gate_check: bool,
+    /// Live include list. Clone this handle before `run` / `run_transactions`
+    /// to add or remove tables without ending the dump thread.
+    ///
+    /// If never mutated, capture start copies [`SourceConfig::include_tables`].
+    /// Updates take effect at the next GTID (best-effort; no ack).
+    pub include: IncludeList,
 }
 
 impl MysqlBinlogSource {
-    fn include_set(&self) -> HashSet<String> {
-        self.config
-            .include_tables
-            .iter()
-            .map(|t| t.as_subject())
-            .collect()
+    /// Cloneable handle to [`Self::include`]. Same Arc as the dump thread uses.
+    pub fn include_handle(&self) -> IncludeList {
+        self.include.clone()
     }
 
     fn initial_executed_set(&self) -> Result<ExecutedSet> {
@@ -157,7 +162,9 @@ impl MysqlBinlogSource {
         }
 
         let source_id = self.config.source_id.clone();
-        let include = self.include_set();
+        self.include
+            .seed_if_uninitialized(&self.config.include_tables);
+        let include = self.include.clone();
         let payload_mode = self.config.payload_mode;
         let delivery_unit = self.config.delivery_unit;
         let capacity = self.config.queue_capacity.max(1);
@@ -168,7 +175,8 @@ impl MysqlBinlogSource {
         info!(
             server_id,
             source = %source_id,
-            include = ?include,
+            include = ?include.subjects(),
+            include_all = include.is_all(),
             ?payload_mode,
             ?delivery_unit,
             queue_capacity = capacity,
@@ -272,7 +280,7 @@ async fn binlog_loop(
     server_id: u64,
     start: StartPosition,
     source_id: String,
-    include: HashSet<String>,
+    include: IncludeList,
     executed: Arc<tokio::sync::Mutex<ExecutedSet>>,
     payload_mode: PayloadMode,
     tx: tokio::sync::mpsc::Sender<std::result::Result<CommittedTransaction, String>>,

@@ -53,3 +53,7 @@ Default sink encoding is **JSON**. Set `sink.format = "avro"` for optional binar
 | `transaction` | One JSON envelope per commit | `ce-stream.committed-transaction.v1` per commit |
 
 See [`avro.md`](avro.md). Checkpoint and delivery semantics are unchanged.
+
+## Live include list (v0.3.0)
+
+Row events are filtered by a cloneable [`IncludeList`](library.md#live-include-list) snapshotted at **GTID**. Changing the list never splits an in-flight envelope. Fully filtered commits are still delivered (GTID watermark advances). DDL Query events are not filtered. There is no ack; the next transaction after the following GTID uses the new list.

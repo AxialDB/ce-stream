@@ -1,5 +1,6 @@
 //! In-flight MySQL transaction buffer (commit-boundary emit).
 
+use crate::include::IncludeFilter;
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
 use ce_stream_core::CloudEvent;
 
@@ -9,11 +10,22 @@ pub struct TxnBuffer {
     pending_gtid: Option<String>,
     ddl: Vec<DdlStatement>,
     events: Vec<CloudEvent>,
+    /// Include snapshot taken at GTID for this envelope.
+    include_filter: IncludeFilter,
 }
 
 impl TxnBuffer {
     pub fn pending_gtid(&self) -> Option<&str> {
         self.pending_gtid.as_deref()
+    }
+
+    /// Pin the include list for this transaction. Call at GTID, before rows.
+    pub(crate) fn set_include(&mut self, filter: IncludeFilter) {
+        self.include_filter = filter;
+    }
+
+    pub fn allows(&self, subject: &str) -> bool {
+        self.include_filter.row_allowed(subject)
     }
 
     pub fn on_gtid(&mut self, gtid: String) {

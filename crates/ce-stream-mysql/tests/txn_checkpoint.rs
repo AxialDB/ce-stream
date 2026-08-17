@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ce_stream_core::avro_encode;
@@ -8,7 +8,7 @@ use ce_stream_core::event::{ChangeOp, PayloadMode, TableRef};
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
 use ce_stream_core::{Checkpoint, CheckpointStore, CloudEvent, DeliveryUnit};
 use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
-use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, TxnBuffer};
+use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, IncludeList, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -93,7 +93,7 @@ fn txn_buffer_no_emit_before_xid() {
 
 #[test]
 fn dispatch_no_commit_before_xid() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(AsyncMutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -134,7 +134,7 @@ fn dispatch_no_commit_before_xid() {
 
 #[test]
 fn dispatch_three_row_callbacks_after_xid_in_row_mode() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(AsyncMutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -195,7 +195,7 @@ fn dispatch_three_row_callbacks_after_xid_in_row_mode() {
 
 #[test]
 fn all_filtered_txn_produces_empty_commit_at_xid() {
-    let include = HashSet::from(["other.table".into()]);
+    let include = IncludeList::from_subjects(["other.table"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(AsyncMutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -231,7 +231,7 @@ fn all_filtered_txn_produces_empty_commit_at_xid() {
 
 #[test]
 fn row_event_without_gtid_hard_fails() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, _rx) = mpsc::channel(4);
     let executed = Arc::new(AsyncMutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -257,7 +257,7 @@ fn row_event_without_gtid_hard_fails() {
 
 #[test]
 fn dispatch_ddl_populated_in_commit() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(AsyncMutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -521,7 +521,7 @@ async fn empty_commit_still_advances_watermark() {
 
 #[test]
 fn all_filtered_commit_still_checkpoints() {
-    let include = HashSet::from(["other.table".into()]);
+    let include = IncludeList::from_subjects(["other.table"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(AsyncMutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();

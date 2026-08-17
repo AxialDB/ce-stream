@@ -23,11 +23,11 @@ The Gate 0 crash harness ([`scripts/crash-harness/`](../scripts/crash-harness/RE
 2. Open one PR. Include `Fixes #1` in the body when the PR closes that issue.
 3. Wait for **CI** and **Release** (package) jobs on the PR. Linux and Windows builds must both succeed.
 4. Merge to `main`.
-5. Annotated tag on `main`: `git tag -a v0.2.0 -m "v0.2.0: Gate 0 transaction-boundary capture"`
-6. Push the tag: `git push origin v0.2.0`
-7. The **Release** workflow publishes the GitHub Release from `docs/releases/v0.2.0.md` and attaches:
-   - `ce-stream-v0.2.0-x86_64-unknown-linux-gnu.tar.gz`
-   - `ce-stream-v0.2.0-x86_64-pc-windows-msvc.zip`
+5. Annotated tag on `main`: `git tag -a v0.3.0 -m "v0.3.0: live include-list updates"`
+6. Push the tag: `git push origin v0.3.0`
+7. The **Release** workflow publishes the GitHub Release from `docs/releases/v0.3.0.md` and attaches:
+   - `ce-stream-v0.3.0-x86_64-unknown-linux-gnu.tar.gz`
+   - `ce-stream-v0.3.0-x86_64-pc-windows-msvc.zip`
    - `SHA256SUMS`
 
 Do **not** tag from unmerged feature branches. Do **not** attach laptop/WSL binaries as the canonical GitHub Release assets.
@@ -51,6 +51,6 @@ bash scripts/release/package-linux.sh 0.2.0
 
 ## Post-release
 
-- [ ] Confirm issue #1 closed (`Fixes #1` on the merged PR, or close after the tag).
+- [ ] Confirm issue #3 closed (`Fixes #3` on the merged PR, or close after the tag).
 - [ ] Confirm both Linux and Windows assets plus `SHA256SUMS` on the GitHub Release.
 - [ ] Announce in Discussions (optional).

@@ -1,13 +1,13 @@
 //! DDL buffering and row-mode / transaction-mode delivery tests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ce_stream_core::event::PayloadMode;
 use ce_stream_core::DeliveryUnit;
 use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
 use ce_stream_mysql::DDL_CE_TYPE;
-use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, TxnBuffer};
+use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, IncludeList, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -44,7 +44,7 @@ fn write_rows(n: usize) -> WriteRowsEvent {
 
 #[test]
 fn ddl_buffered_then_commit_includes_ddl_and_rows() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -91,7 +91,7 @@ fn ddl_buffered_then_commit_includes_ddl_and_rows() {
 
 #[test]
 fn row_mode_one_ddl_ce_then_three_row_ces() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
@@ -163,7 +163,7 @@ fn row_mode_one_ddl_ce_then_three_row_ces() {
 
 #[test]
 fn begin_query_is_ignored() {
-    let include = HashSet::from(["demo.orders".into()]);
+    let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(4);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();

@@ -22,19 +22,18 @@ cargo run -p ce-stream-cli --release -- --config ce-stream.toml
 Install from git (crates.io publish comes later):
 
 ```powershell
-cargo install --git https://github.com/ce-stream/ce-stream --locked --tag v0.2.0 ce-stream-cli
+cargo install --git https://github.com/ce-stream/ce-stream --locked --tag v0.3.0 ce-stream-cli
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/ce-stream/ce-stream/releases) (`v0.2.0` - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no MySQL).
+Pre-built binaries: [GitHub Releases](https://github.com/ce-stream/ce-stream/releases) (`v0.3.0` - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no MySQL).
 
-### v0.2.0 highlights
+### v0.3.0 highlights
 
-- **Commit-boundary capture** — checkpoint and emit at XID; fixes mid-transaction data loss ([#1](https://github.com/ce-stream/ce-stream/issues/1)).
+- **Live include list** — add/remove `database.table` on a running session without reconnecting ([#3](https://github.com/ce-stream/ce-stream/issues/3)). Takes effect at the next GTID.
+- **Commit-boundary capture** (v0.2.0) — checkpoint and emit at XID.
 - **`delivery_unit`** — `row` (default) or `transaction` (`CommittedTransaction` envelope).
-- **GTID resume** — reliable restart after crash, including `gtid_purged` servers.
-- **DDL + compressed transactions** — first-class DDL; `TransactionPayload` unpack.
 
-See [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) and [`CHANGELOG.md`](CHANGELOG.md).
+See [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (required; validated at connect).
 
