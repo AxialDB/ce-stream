@@ -1,6 +1,6 @@
 # Using ce-stream as a library
 
-**Status:** Supported. MySQL 9.x only for v1; other adapters deferred.
+**Status:** Supported. MySQL 9.x for v1; MongoDB 8.0+ in progress ([#5](https://github.com/AxialDB/ce-stream/issues/5)); other adapters deferred.
 
 The CLI is a thin host. Embed capture in your own process with the same single ordered reader.
 

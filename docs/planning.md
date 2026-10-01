@@ -1,6 +1,6 @@
 # ce-stream — implementation plan
 
-**Status:** Phases 0–5 done (MySQL 9.x JSON + Avro, E2E, harden, perf). **Other DB engines deferred** (Phase 6 parked). Lean OSS MVP landed in-repo; next: enable Discussions, tag `v0.1.0` — see [`oss-readiness.md`](oss-readiness.md). Maintained by [AxialDB](https://axialdb.com/) ([releases](https://github.com/AxialDB/releases)).
+**Status:** Phases 0–5 done (MySQL 9.x JSON + Avro, E2E, harden, perf). **Phase 6 un-deferred for MongoDB only** ([#5](https://github.com/AxialDB/ce-stream/issues/5), 2026-10-01); other engines stay deferred. Lean OSS MVP landed in-repo — see [`oss-readiness.md`](oss-readiness.md). Maintained by [AxialDB](https://axialdb.com/) ([releases](https://github.com/AxialDB/releases)).
 
 **Product:** Database change logs → **CloudEvents 1.0** (include-list, resume, Kafka optional). Not a warehouse ELT tool; not Debezium/Kafka Connect.
 
@@ -128,25 +128,28 @@ Location: [`scripts/perf/`](../scripts/perf/). Spec: [`docs/perf-harness.md`](pe
 
 ---
 
-## Phase 6 — Multi-DB adapters — **DEFERRED**
+## Phase 6 — Multi-DB adapters — **MongoDB in progress; others deferred**
 
-Same `ChangeSource` / CloudEvent envelope (sketch only; **not scheduled**):
+Same `ChangeSource` / CloudEvent envelope:
 
-| Adapter | Mechanism (sketch) |
-|---------|-------------------|
-| `ce-stream-postgres` | Logical decoding / replication protocol |
-| `ce-stream-sqlite` | update hooks / session (different shape) |
-| MSSQL | Prefer consuming **CES** if available; not a binlog clone |
+| Adapter | Mechanism | Status |
+|---------|-----------|--------|
+| `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **In progress** ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
+| `ce-stream-postgres` | Logical decoding / replication protocol (sketch) | Deferred |
+| `ce-stream-sqlite` | update hooks / session (different shape, sketch) | Deferred |
+| MSSQL | Prefer consuming **CES** if available; not a binlog clone (sketch) | Deferred |
 
-**Exit (when un-deferred):** Second adapter behind the same CLI `source.adapter = …`.
+**Exit (MongoDB):** `ce-stream-mongo` behind the same CLI `source.adapter = "mongo"`, released as v0.4.0. MySQL output unchanged.
 
 **Decision (2026-08-02):** Park Phase 6. v1 stays **MySQL 9.x only**. Traits may remain adapter-shaped so a future second engine can plug in without redesign, but no Postgres/SQLite/MSSQL work until explicitly pulled back.
+
+**Decision (2026-10-01):** Pull MongoDB back from Phase 6 ([#5](https://github.com/AxialDB/ce-stream/issues/5)). AxialDB needs MongoDB CDC without Kafka or Debezium, and change streams fit the existing `ChangeSource` and commit-boundary model. Scope: MongoDB 8.0+ replica sets, no sharded clusters. Postgres, SQLite, and MSSQL stay deferred.
 
 ---
 
 ## Out of scope (until explicitly pulled in)
 
-- Other DB engines (Phase 6 — deferred)
+- Other DB engines besides MongoDB (Phase 6 — deferred)
 - Competing with Fivetran on quietness as a product claim (measure; don't market until proven)
 - In-process MySQL transmit/trans observers as primary capture
 - AxialDB coupling (optional subscriber later; separate repo)
@@ -161,7 +164,8 @@ Same `ChangeSource` / CloudEvent envelope (sketch only; **not scheduled**):
 Phase 0 → 1 (spike) → 2 (MVP) → 3 (HTTP E2E) → 4 (harden)
   → 4.5 (perf harness) → 5 (Avro)  [done]
   → OSS readiness / v0.1 tag
-  → Phase 6 (other DBs) only if un-deferred
+  → v0.2.0 (#1 Gate 0) → v0.3.0 (#3 live include list)
+  → Phase 6: MongoDB (#5, v0.4.0); other DBs only if un-deferred
 ```
 
-**Now:** Product path through Phase 5 complete; Phase 6 deferred; lean OSS MVP files in repo. **Next:** enable GitHub Discussions; tag `v0.1.0` when ready; crates.io later.
+**Now:** MongoDB change stream source ([#5](https://github.com/AxialDB/ce-stream/issues/5)). **Later:** crates.io publish.
