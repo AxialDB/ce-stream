@@ -1,6 +1,6 @@
 //! In-flight MySQL transaction buffer (commit-boundary emit).
 
-use crate::include::IncludeFilter;
+use ce_stream_core::include::IncludeFilter;
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
 use ce_stream_core::CloudEvent;
 
@@ -48,7 +48,9 @@ impl TxnBuffer {
         Some(CommittedTransaction {
             gtid,
             gtid_set_after,
+            position: None,
             ddl: std::mem::take(&mut self.ddl),
+            control: Vec::new(),
             events: std::mem::take(&mut self.events),
         })
     }

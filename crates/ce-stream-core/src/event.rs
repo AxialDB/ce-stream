@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Database + table identity (adapter-agnostic).
+/// Database + table (or collection) identity (adapter-agnostic).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TableRef {
     pub database: String,

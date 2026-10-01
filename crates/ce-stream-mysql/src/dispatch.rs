@@ -137,6 +137,7 @@ mod tests {
             gtid_set_after: format!("{gtid}"),
             ddl: vec![],
             events,
+            ..Default::default()
         }
     }
 
@@ -231,6 +232,7 @@ mod tests {
                 query: "ALTER TABLE t ADD COLUMN x INT".into(),
             }],
             events: sample_txn("abc:1", 3).events,
+            ..Default::default()
         };
 
         deliver_committed(
@@ -275,6 +277,7 @@ mod tests {
                     query: "CREATE TABLE t (id INT)".into(),
                 }],
                 events: vec![],
+                ..Default::default()
             },
             &mut deliver_ctx(
                 &mut executed,
@@ -314,6 +317,7 @@ mod tests {
                     query: "ALTER TABLE t ADD COLUMN x INT".into(),
                 }],
                 events: sample_txn("abc:1", 3).events,
+                ..Default::default()
             },
             &mut deliver_ctx(
                 &mut executed,

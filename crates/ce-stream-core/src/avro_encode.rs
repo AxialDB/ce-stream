@@ -134,7 +134,16 @@ pub fn decode_cloudevent(bytes: &[u8]) -> Result<CloudEvent> {
 }
 
 /// Encode a committed transaction as a single Avro binary datum.
+///
+/// `committed-transaction-v1` carries MySQL commits only. A commit with
+/// `position` or `control` set is refused rather than encoded without them.
 pub fn encode_committed_transaction(txn: &CommittedTransaction) -> Result<Vec<u8>> {
+    if txn.position.is_some() || !txn.control.is_empty() {
+        let adapter = txn.source_position().adapter;
+        return Err(Error::Sink(format!(
+            "avro committed-transaction-v1 carries MySQL commits only; use JSON for adapter {adapter}"
+        )));
+    }
     let ddl: Result<Vec<_>> = txn.ddl.iter().map(|s| Ok(ddl_to_value(s))).collect();
     let events: Result<Vec<_>> = txn.events.iter().map(cloud_event_to_value).collect();
 
@@ -173,7 +182,9 @@ pub fn decode_committed_transaction(bytes: &[u8]) -> Result<CommittedTransaction
     Ok(CommittedTransaction {
         gtid,
         gtid_set_after,
+        position: None,
         ddl,
+        control: Vec::new(),
         events,
     })
 }
@@ -252,7 +263,22 @@ mod tests {
                 sample_row_event(2),
                 sample_row_event(3),
             ],
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn avro_refuses_non_mysql_commit() {
+        let txn = CommittedTransaction {
+            position: Some(crate::transaction::SourcePosition {
+                adapter: "mongo".into(),
+                at: serde_json::json!({}),
+                after: serde_json::json!({}),
+            }),
+            ..Default::default()
+        };
+        let err = encode_committed_transaction(&txn).unwrap_err().to_string();
+        assert!(err.contains("adapter mongo"), "{err}");
     }
 
     #[test]

@@ -4,11 +4,11 @@ use crate::error::Result;
 use crate::event::{CloudEvent, PayloadMode, TableRef};
 use crate::transaction::CommittedTransaction;
 
-/// What the consumer receives per MySQL commit (after XID).
+/// What the consumer receives per source commit (MySQL: after XID).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeliveryUnit {
-    /// N row CloudEvents per commit, emitted in order **after** XID (default).
+    /// N row CloudEvents per commit, emitted in order **after** the commit (default).
     #[default]
     Row,
     /// One [`CommittedTransaction`] envelope per commit.
@@ -43,13 +43,14 @@ impl Default for SourceConfig {
 
 #[async_trait]
 pub trait ChangeSource: Send {
-    /// Row mode (`delivery_unit = Row`): after XID, one callback per row CloudEvent.
+    /// Row mode (`delivery_unit = Row`): after each commit, one callback per row CloudEvent.
     /// Checkpoint advances only after all row callbacks for the commit return Ok.
     async fn run<F>(&mut self, on_event: F) -> Result<()>
     where
         F: FnMut(CloudEvent) -> Result<()> + Send;
 
-    /// Transaction mode (`delivery_unit = Transaction`): after XID, one envelope per commit.
+    /// Transaction mode (`delivery_unit = Transaction`): one envelope per commit.
+    /// Checkpoint advances only after the callback returns Ok.
     async fn run_transactions<F>(&mut self, on_txn: F) -> Result<()>
     where
         F: FnMut(CommittedTransaction) -> Result<()> + Send;
