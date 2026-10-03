@@ -1,5 +1,8 @@
 //! MySQL 9.x ROW binlog → [`ce_stream_core::CloudEvent`].
 
+// See the same allow in `ce-stream-core`: async_trait vs clippy 1.99 `double_must_use`.
+#![allow(clippy::double_must_use)]
+
 mod binlog_dispatch;
 mod ddl;
 mod dispatch;

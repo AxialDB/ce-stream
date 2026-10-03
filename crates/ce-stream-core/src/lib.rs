@@ -1,5 +1,10 @@
 //! Shared types: CloudEvents envelope, change ops, source/sink traits, checkpoint.
 
+// `async_trait` keeps rustc's message-less `#[must_use]` on methods that return
+// `Pin<Box<dyn Future>>`, which is already `#[must_use]`. Clippy 1.99
+// (`double_must_use`) rejects that. Drop this when async-trait allows the lint.
+#![allow(clippy::double_must_use)]
+
 pub mod avro_encode;
 pub mod checkpoint;
 pub mod error;

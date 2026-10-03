@@ -1,3 +1,6 @@
+// Integration-test crate: same async_trait / clippy 1.99 `double_must_use` as the lib.
+#![allow(clippy::double_must_use)]
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
