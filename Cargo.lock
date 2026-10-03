@@ -619,9 +619,11 @@ version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "ce-stream-core",
+ "ce-stream-mongo",
  "ce-stream-mysql",
  "chrono",
  "clap",
+ "mongodb",
  "rustls",
  "serde",
  "serde_json",

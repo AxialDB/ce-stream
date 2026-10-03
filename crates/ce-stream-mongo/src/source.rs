@@ -7,13 +7,13 @@ use ce_stream_core::include::IncludeList;
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
 use ce_stream_core::transaction::{CommittedTransaction, ControlEvent};
 use ce_stream_core::{Checkpoint, CheckpointStore};
-use mongodb::bson::{Bson, Document};
+use mongodb::bson::Document;
 use mongodb::change_stream::event::{ChangeStreamEvent, OperationType, ResumeToken};
 use mongodb::options::FullDocumentType;
 use mongodb::Client;
 use serde_json::Value;
 
-use crate::bson_json::{bson_to_json, document_to_json};
+use crate::bson_json::{document_to_json, document_to_json_owned};
 use crate::checkpoint::{ClusterTime, MongoCheckpoint};
 use crate::gate::validate_capture_gates;
 use crate::group::{Emit, TxnGrouper};
@@ -86,6 +86,11 @@ impl MongoChangeStreamSource {
             });
         if let Some(token) = resume {
             watch = watch.resume_after(token);
+        } else if let Some(seed_time) = seed {
+            watch = watch.start_at_operation_time(mongodb::bson::Timestamp {
+                time: seed_time.t,
+                increment: seed_time.i,
+            });
         }
         let mut stream = watch.await.map_err(map_mongo)?;
         let mut grouper = TxnGrouper::new(seed);
@@ -208,9 +213,7 @@ fn raw_change(event: ChangeStreamEvent<Document>) -> Result<RawChange> {
         to_db,
         to_coll,
         document_key: event.document_key.as_ref().map(document_to_json),
-        full_document: event
-            .full_document
-            .map(|doc| bson_to_json(Bson::Document(doc))),
+        full_document: event.full_document.map(document_to_json_owned),
         txn_key,
         resume_token,
         cluster_time,
@@ -225,7 +228,7 @@ fn resume_token(stored: &MongoCheckpoint) -> Option<ResumeToken> {
     serde_json::from_value(stored.resume_token.clone()).ok()
 }
 
-fn map_mongo(err: mongodb::error::Error) -> Error {
+pub(crate) fn map_mongo(err: mongodb::error::Error) -> Error {
     let lost = matches!(
         err.kind.as_ref(),
         mongodb::error::ErrorKind::Command(cmd) if cmd.code == HISTORY_LOST_CODE

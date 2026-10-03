@@ -1,0 +1,60 @@
+{
+  "type": "record",
+  "name": "CommittedTransaction",
+  "namespace": "io.ce_stream.v2",
+  "doc": "Commit envelope used when position or control is set (MongoDB, and any later adapter). MySQL commits with neither field stay on committed-transaction-v1. Schema id: ce-stream.committed-transaction.v2",
+  "fields": [
+    { "name": "adapter", "type": "string" },
+    {
+      "name": "position_at_json",
+      "type": "string",
+      "doc": "JSON object: position of this commit"
+    },
+    {
+      "name": "position_after_json",
+      "type": "string",
+      "doc": "JSON object: resume payload after this commit"
+    },
+    { "name": "gtid", "type": "string" },
+    { "name": "gtid_set_after", "type": "string" },
+    {
+      "name": "ddl",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "DdlStatement",
+          "fields": [
+            { "name": "schema", "type": "string" },
+            { "name": "query", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "control_json",
+      "type": "string",
+      "doc": "JSON array of control events. [] when there are none."
+    },
+    {
+      "name": "events",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "CloudEvent",
+          "fields": [
+            { "name": "specversion", "type": "string" },
+            { "name": "id", "type": "string" },
+            { "name": "type", "type": "string" },
+            { "name": "source", "type": "string" },
+            { "name": "subject", "type": "string" },
+            { "name": "time", "type": "string" },
+            { "name": "extensions_json", "type": "string" },
+            { "name": "data_json", "type": "string" }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -3,10 +3,7 @@
 use async_trait::async_trait;
 use tracing::{debug, info};
 
-use crate::avro_encode::{
-    self, COMMITTED_TRANSACTION_SCHEMA_ID, CONTENT_TYPE_AVRO, CONTENT_TYPE_COMMITTED_TXN_AVRO,
-    SCHEMA_ID,
-};
+use crate::avro_encode::{self, CONTENT_TYPE_AVRO, CONTENT_TYPE_COMMITTED_TXN_AVRO, SCHEMA_ID};
 use crate::error::{Error, Result};
 use crate::event::{CloudEvent, SinkFormat};
 use crate::transaction::CommittedTransaction;
@@ -115,11 +112,12 @@ impl HttpSink {
             SinkFormat::Json => self.post_json(txn).await,
             SinkFormat::Avro => {
                 let body = avro_encode::encode_committed_transaction(txn)?;
+                let schema_id = avro_encode::committed_transaction_schema_id(txn);
                 let mut req = self
                     .client
                     .post(&self.url)
                     .header("content-type", CONTENT_TYPE_COMMITTED_TXN_AVRO)
-                    .header("x-ce-stream-avro-schema", COMMITTED_TRANSACTION_SCHEMA_ID)
+                    .header("x-ce-stream-avro-schema", schema_id)
                     .body(body);
                 for (k, v) in &self.headers {
                     req = req.header(k, v);
