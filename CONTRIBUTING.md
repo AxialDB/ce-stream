@@ -20,8 +20,8 @@ Requirements: Rust stable (see `rust-version` in workspace `Cargo.toml`), MySQL 
 
 ```powershell
 cargo fmt --all
-cargo clippy -p ce-stream-core -p ce-stream-mysql -p ce-stream-cli -p ce-stream-perf-sink --no-deps -- -D warnings
-cargo test -p ce-stream-core -p ce-stream-mysql
+cargo clippy -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo -p ce-stream-cli -p ce-stream-perf-sink --no-deps -- -D warnings
+cargo test -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo
 ```
 
 Copy `ce-stream.toml.example` → `ce-stream.toml` for local runs (gitignored). Do not commit secrets.

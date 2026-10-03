@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ce-stream-core",
     "crates/ce-stream-mysql",
+    "crates/ce-stream-mongo",
     "crates/ce-stream-cli",
     "crates/ce-stream-spike",
     "crates/ce-stream-perf-sink",

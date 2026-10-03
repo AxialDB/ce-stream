@@ -10,6 +10,9 @@ pub enum Error {
     Checkpoint(String),
     #[error("config: {0}")]
     Config(String),
+    /// The resume token is older than the oplog window. The consumer must seed again.
+    #[error("change stream history lost: {0}")]
+    HistoryLost(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
