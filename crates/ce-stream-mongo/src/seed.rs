@@ -22,15 +22,22 @@ pub const SEED_BATCH: u32 = 512;
 
 pub async fn note_cluster_time(client: &Client) -> Result<ClusterTime> {
     let mut session = client.start_session().await.map_err(map_mongo)?;
+    // `ping` rejects readConcern. A majority find is the smallest command that returns one.
     client
         .database("admin")
-        .run_command(doc! { "ping": 1, "readConcern": { "level": "majority" } })
+        .run_command(doc! {
+            "find": "system.version",
+            "filter": {},
+            "limit": 1,
+            "batchSize": 1,
+            "readConcern": { "level": "majority" }
+        })
         .session(&mut session)
         .await
         .map_err(map_mongo)?;
     let ts = session
         .operation_time()
-        .ok_or_else(|| Error::Source("majority ping did not return an operationTime".into()))?;
+        .ok_or_else(|| Error::Source("majority find did not return an operationTime".into()))?;
     Ok(ClusterTime {
         t: ts.time,
         i: ts.increment,
