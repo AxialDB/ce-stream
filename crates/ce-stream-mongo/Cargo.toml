@@ -1,0 +1,20 @@
+[package]
+name = "ce-stream-mongo"
+description = "MongoDB 8.0+ change stream source for ce-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+# mongodb 3.9 requires Rust 1.88. The rest of the workspace stays at 1.75.
+rust-version = "1.88"
+
+[dependencies]
+async-trait = { workspace = true }
+futures-util = "0.3"
+ce-stream-core = { workspace = true }
+mongodb = "3.9.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

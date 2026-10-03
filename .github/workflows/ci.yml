@@ -36,10 +36,11 @@ jobs:
           cargo clippy
           -p ce-stream-core
           -p ce-stream-mysql
+          -p ce-stream-mongo
           -p ce-stream-cli
           -p ce-stream-perf-sink
           --no-deps
           -- -D warnings
 
       - name: cargo test (unit, no MySQL)
-        run: cargo test -p ce-stream-core -p ce-stream-mysql
+        run: cargo test -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo
