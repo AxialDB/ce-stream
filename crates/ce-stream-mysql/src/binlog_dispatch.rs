@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 
 use crate::ddl;
 use crate::gtid::ExecutedSet;
-use crate::include::IncludeList;
+use ce_stream_core::include::IncludeList;
+
 use crate::map;
 use crate::txn_buffer::TxnBuffer;
 

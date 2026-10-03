@@ -1,11 +1,13 @@
 //! MySQL 9.x ROW binlog → [`ce_stream_core::CloudEvent`].
 
+// See the same allow in `ce-stream-core`: async_trait vs clippy 1.99 `double_must_use`.
+#![allow(clippy::double_must_use)]
+
 mod binlog_dispatch;
 mod ddl;
 mod dispatch;
 mod gate;
 mod gtid;
-mod include;
 mod map;
 mod txn_buffer;
 
@@ -25,11 +27,12 @@ use ce_stream_core::{
 };
 use tracing::info;
 
+/// Re-export for v0.3 callers. Import from `ce_stream_core` instead; removed in v0.5.
+pub use ce_stream_core::include::IncludeList;
 pub use ddl::DDL_CE_TYPE;
 pub use dispatch::{deliver_committed, DeliverCtx};
 pub use gate::{validate_capture_gates, GateReport};
 pub use gtid::ExecutedSet;
-pub use include::IncludeList;
 pub use map::column_value_to_json;
 pub use txn_buffer::TxnBuffer;
 

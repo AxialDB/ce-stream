@@ -16,7 +16,7 @@ There is no public Jira. GitHub is the tracker.
 
 ## Development
 
-Requirements: Rust stable (see `rust-version` in workspace `Cargo.toml`), MySQL **9.x** only if you run live capture / E2E.
+Requirements: Rust stable (see `rust-version` in workspace `Cargo.toml`), MySQL **9.x** (or a MongoDB **8.0+** replica set for the Mongo source) only if you run live capture / E2E.
 
 ```powershell
 cargo fmt --all
@@ -37,7 +37,9 @@ Release binaries (Linux + Windows) are built by `.github/workflows/release.yml` 
 3. Ensure fmt / clippy / unit tests pass locally.
 4. Fill in the PR template.
 
-## Scope reminders (v1)
+Maintainers: issue, branch, PR, and release steps are in [`docs/releasing.md`](docs/releasing.md#issue-to-release-workflow).
 
-- MySQL **9.x** only; other DB engines are deferred.
+## Scope reminders
+
+- MySQL **9.x**. MongoDB **8.0+** replica sets are in progress ([#5](https://github.com/AxialDB/ce-stream/issues/5)). Other DB engines are deferred.
 - JSON CloudEvents are the default interchange; Avro is optional.

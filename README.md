@@ -7,7 +7,7 @@ CloudEvents change streams from database logs.
 [![CI](https://github.com/ce-stream/ce-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/ce-stream/ce-stream/actions/workflows/ci.yml)
 
 **v1:** MySQL **9.x** ROW binlog → CloudEvents 1.0 (JSON default; optional Avro). Kafka not required.  
-**Deferred:** other DB adapters — see [`docs/planning.md`](docs/planning.md).
+**In progress:** MongoDB **8.0+** change streams ([#5](https://github.com/AxialDB/ce-stream/issues/5)). **Deferred:** other DB adapters — see [`docs/planning.md`](docs/planning.md).
 
 ## Quick start
 

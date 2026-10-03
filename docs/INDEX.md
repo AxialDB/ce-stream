@@ -8,10 +8,11 @@
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Everyone | Release notes |
 | [`releases/v0.3.0.md`](releases/v0.3.0.md) | Everyone | **v0.3.0** release notes (live include list) |
 | [`releases/v0.2.0.md`](releases/v0.2.0.md) | Everyone | v0.2.0 release notes (Gate 0) |
-| [`releasing.md`](releasing.md) | Maintainers | Tag + GitHub Release workflow |
+| [`releasing.md`](releasing.md) | Maintainers | Issue → branch → PR → tag workflow; GitHub Release |
+| [`issues/5.md`](issues/5.md) | Maintainers | MongoDB change stream source (#5, in progress) |
 | [`issues/3.md`](issues/3.md) | Maintainers | Live include list (closes #3) |
 | [`issues/1.md`](issues/1.md) | Maintainers | Gate 0 plan (closes #1) |
-| [`planning.md`](planning.md) | Maintainers | Phase status; Phase 6 multi-DB **deferred** |
+| [`planning.md`](planning.md) | Maintainers | Phase status; Phase 6: MongoDB in progress, other DBs **deferred** |
 | [`oss-readiness.md`](oss-readiness.md) | Maintainers | Lean OSS MVP (historical plan; see releasing.md for v0.2) |
 | [`ops-e2e.md`](ops-e2e.md) | Operators | Continuous capture → HTTP |
 | [`delivery.md`](delivery.md) | Operators / consumers | At-least-once, backpressure, payload modes |
@@ -22,4 +23,4 @@
 | [`perf-harness.md`](perf-harness.md) | Maintainers | Lab scenarios + JSON/Avro results |
 | [`spike-mysql-binlog.md`](spike-mysql-binlog.md) | Maintainers | Historical Phase 1 gate notes |
 
-**v1 product:** MySQL 9.x only. Other engines are deferred (not scheduled).
+**v1 product:** MySQL 9.x. MongoDB 8.0+ in progress ([#5](https://github.com/AxialDB/ce-stream/issues/5)). Other engines are deferred (not scheduled).

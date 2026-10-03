@@ -1,3 +1,6 @@
+// Integration-test crate: same async_trait / clippy 1.99 `double_must_use` as the lib.
+#![allow(clippy::double_must_use)]
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -51,6 +54,7 @@ fn make_txn(gtid: &str, rows: usize) -> CommittedTransaction {
         gtid_set_after: format!("{gtid}"),
         ddl: vec![],
         events: (0..rows).map(|_| row_event()).collect(),
+        ..Default::default()
     }
 }
 
@@ -425,6 +429,7 @@ async fn ddl_in_commit_row_mode() {
                 query: "ALTER TABLE t ADD COLUMN x INT".into(),
             }],
             events: make_txn("abc:1", 3).events,
+            ..Default::default()
         },
         &mut DeliverCtx {
             source_id: "mysql://test",
@@ -501,6 +506,7 @@ async fn empty_commit_still_advances_watermark() {
             gtid_set_after: "abc:1-1".into(),
             ddl: vec![],
             events: vec![],
+            ..Default::default()
         },
         &mut DeliverCtx {
             source_id: "mysql://test",

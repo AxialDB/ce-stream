@@ -1,14 +1,14 @@
-//! Live include-list for a capture session.
+//! Live include-list for a capture session (shared by all adapters).
 
 use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
-use ce_stream_core::event::TableRef;
+use crate::event::TableRef;
 
 /// Snapshot of the include list for one transaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum IncludeFilter {
+pub enum IncludeFilter {
     /// Empty `include_tables` at start: every table.
     #[default]
     All,
@@ -17,7 +17,7 @@ pub(crate) enum IncludeFilter {
 }
 
 impl IncludeFilter {
-    pub(crate) fn row_allowed(&self, subject: &str) -> bool {
+    pub fn row_allowed(&self, subject: &str) -> bool {
         match self {
             Self::All => true,
             Self::Only(set) => set.contains(subject),
@@ -49,14 +49,14 @@ struct Inner {
 
 /// Cloneable handle to the capture include list (`database.table` subjects).
 ///
-/// Updates take effect at the **next GTID** (start of the next transaction),
-/// never mid-envelope. There is no ack: the change is best-effort from that
-/// boundary.
+/// Adapters snapshot the list at the start of each source transaction (MySQL:
+/// the GTID event), so updates never split an envelope. There is no ack: the
+/// change is best-effort from the next transaction.
 ///
 /// An empty `include_tables` at capture start means all tables (v0.2.0). After
 /// that, [`Self::remove`] of the last table or [`Self::replace`] with an empty
-/// list means **no** row events (empty commits still flow). DDL Query events
-/// are not filtered (same as v0.2.0).
+/// list means **no** row events (empty commits still flow). MySQL DDL Query
+/// events are not filtered (same as v0.2.0).
 #[derive(Clone, Debug)]
 pub struct IncludeList {
     inner: Arc<RwLock<Inner>>,
@@ -118,7 +118,8 @@ impl IncludeList {
         self.inner.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub(crate) fn snapshot_filter(&self) -> IncludeFilter {
+    /// Filter to pin for one transaction.
+    pub fn snapshot_filter(&self) -> IncludeFilter {
         self.read().filter.clone()
     }
 
@@ -144,7 +145,7 @@ impl IncludeList {
     }
 
     /// Add one `database.table`. No-op when already watching all tables.
-    /// Takes effect at the next GTID.
+    /// Takes effect at the next transaction.
     pub fn insert(&self, table: TableRef) {
         let mut inner = self.write();
         if matches!(inner.filter, IncludeFilter::All) {
@@ -162,7 +163,7 @@ impl IncludeList {
     }
 
     /// Remove one `database.table`. No-op when watching all tables.
-    /// Takes effect at the next GTID.
+    /// Takes effect at the next transaction.
     pub fn remove(&self, table: &TableRef) {
         let mut inner = self.write();
         if !inner.initialized {
