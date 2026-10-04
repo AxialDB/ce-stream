@@ -229,15 +229,24 @@ fn resume_token(stored: &MongoCheckpoint) -> Option<ResumeToken> {
 }
 
 pub(crate) fn map_mongo(err: mongodb::error::Error) -> Error {
-    let lost = matches!(
-        err.kind.as_ref(),
-        mongodb::error::ErrorKind::Command(cmd) if cmd.code == HISTORY_LOST_CODE
-    );
-    if lost {
+    if history_lost(&err) {
         Error::HistoryLost(err.to_string())
     } else {
         Error::Source(err.to_string())
     }
+}
+
+/// Code 286 is `ChangeStreamHistoryLost`. A token the server cannot find is code 280
+/// `ChangeStreamFatalError` with `NonResumableChangeStreamError`. Both mean reseed.
+fn history_lost(err: &mongodb::error::Error) -> bool {
+    if err.contains_label("NonResumableChangeStreamError") {
+        return true;
+    }
+    let text = err.to_string();
+    text.contains("ChangeStreamHistoryLost")
+        || text.contains("NonResumableChangeStreamError")
+        || text.contains("resume token was not found")
+        || text.contains(&format!("code {HISTORY_LOST_CODE}"))
 }
 
 #[async_trait]
