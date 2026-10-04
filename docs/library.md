@@ -1,6 +1,6 @@
 # Using ce-stream as a library
 
-**Status:** Supported. MySQL 9.x for v1; MongoDB 8.0+ in progress ([#5](https://github.com/AxialDB/ce-stream/issues/5)); other adapters deferred.
+**Status:** Supported. MySQL 9.x and MongoDB 8.0+ ([#5](https://github.com/AxialDB/ce-stream/issues/5), v0.4.0). Other adapters are deferred.
 
 The CLI is a thin host. Embed capture in your own process with the same single ordered reader.
 
@@ -8,6 +8,8 @@ The CLI is a thin host. Embed capture in your own process with the same single o
 
 - `ce-stream-core` - `CloudEvent`, `CommittedTransaction`, `ChangeSource`, `Sink`, `CheckpointStore`
 - `ce-stream-mysql` - `MysqlBinlogSource`, `IncludeList`, `FileCheckpointStore`, `validate_capture_gates`
+- `ce-stream-mongo` - `MongoChangeStreamSource` for a MongoDB 8.0+ replica set
+- `ce-stream-cli` - the `ce-stream` binary (`cargo install ce-stream-cli`)
 
 ## Minimal callback (row mode, in-process push)
 

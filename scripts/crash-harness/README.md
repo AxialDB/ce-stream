@@ -1,6 +1,6 @@
 # Crash harness
 
-Manual integration tests that kill ce-stream mid-delivery and assert full transaction redelivery on restart (Gate 0 / [issue #1](https://github.com/ce-stream/ce-stream/issues/1)).
+Manual integration tests that kill ce-stream mid-delivery and assert full transaction redelivery on restart (Gate 0 / [issue #1](https://github.com/AxialDB/ce-stream/issues/1)).
 
 | Adapter | Path | Status |
 |---------|------|--------|

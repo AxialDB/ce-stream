@@ -6,7 +6,7 @@ body:
         Propose a feature or improvement.
 
         Maintainers may promote accepted ideas to Issues on the roadmap.
-        **Bugs** → [Issues](https://github.com/ce-stream/ce-stream/issues).
+        **Bugs** → [Issues](https://github.com/AxialDB/ce-stream/issues).
   - type: textarea
     id: idea
     attributes:

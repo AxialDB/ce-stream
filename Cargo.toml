@@ -7,20 +7,22 @@ members = [
     "crates/ce-stream-cli",
     "crates/ce-stream-spike",
     "crates/ce-stream-perf-sink",
+    "vendor/mysql-binlog-connector-rust",
 ]
 
 [workspace.package]
 version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/ce-stream/ce-stream"
+repository = "https://github.com/AxialDB/ce-stream"
 homepage = "https://axialdb.com/"
 rust-version = "1.75"
 
 [workspace.dependencies]
-ce-stream-core = { path = "crates/ce-stream-core" }
-ce-stream-mysql = { path = "crates/ce-stream-mysql" }
-ce-stream-mongo = { path = "crates/ce-stream-mongo" }
+ce-stream-core = { version = "0.4.0", path = "crates/ce-stream-core" }
+ce-stream-mysql = { version = "0.4.0", path = "crates/ce-stream-mysql" }
+ce-stream-mongo = { version = "0.4.0", path = "crates/ce-stream-mongo" }
+mysql-binlog-connector-rust = { package = "ce-stream-mysql-binlog", version = "0.1.0", path = "vendor/mysql-binlog-connector-rust", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = "0.8"

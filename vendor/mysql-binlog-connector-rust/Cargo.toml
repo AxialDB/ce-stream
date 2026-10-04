@@ -3,17 +3,19 @@
 
 [package]
 edition = "2021"
-name = "mysql-binlog-connector-rust"
-version = "0.3.4"
-authors = ["Shicai Xu <chenglingsu@126.com>"]
+name = "ce-stream-mysql-binlog"
+version = "0.1.0"
+authors = ["Shicai Xu <chenglingsu@126.com>", "AxialDB"]
 categories = ["database"]
-description = "mysql binlog connector (vendored + ce-stream MySQL 9.x patch)"
-documentation = "https://docs.rs/mysql-binlog-connector-rust"
+description = "MySQL binlog connector fork for ce-stream. SHOW BINARY LOG STATUS for MySQL 8.4+ and 9.x. Based on apecloud/mysql-binlog-connector-rust."
 keywords = ["mysql", "binlog", "connector"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/apecloud/mysql-binlog-connector-rust"
-homepage = "https://github.com/apecloud/mysql-binlog-connector-rust"
-readme = "README.md"
+repository = "https://github.com/AxialDB/ce-stream"
+homepage = "https://github.com/AxialDB/ce-stream"
+readme = "PATCHES.md"
+
+[lib]
+name = "mysql_binlog_connector_rust"
 
 [features]
 default = []

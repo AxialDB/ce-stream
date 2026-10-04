@@ -168,4 +168,4 @@ Phase 0 → 1 (spike) → 2 (MVP) → 3 (HTTP E2E) → 4 (harden)
   → Phase 6: MongoDB (#5, v0.4.0); other DBs only if un-deferred
 ```
 
-**Now:** tag v0.4.0 after merge. **Later:** crates.io publish. Postgres, SQLite, and MSSQL stay deferred.
+**Now:** tag v0.4.0 after merge, then publish to crates.io in the order in [`releasing.md`](releasing.md#cratesio). Postgres, SQLite, and MSSQL stay deferred.

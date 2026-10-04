@@ -35,7 +35,7 @@ Release notes: [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md).
 
 ## [0.3.0] - 2026-08-17
 
-Live include-list updates on a running capture session ([issue #3](https://github.com/ce-stream/ce-stream/issues/3)).
+Live include-list updates on a running capture session ([issue #3](https://github.com/AxialDB/ce-stream/issues/3)).
 Release notes: [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md).
 
 ### Added
@@ -56,7 +56,7 @@ Release notes: [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md).
 
 ## [0.2.0] - 2026-08-15
 
-Gate 0 transaction-boundary capture ([issue #1](https://github.com/ce-stream/ce-stream/issues/1)).
+Gate 0 transaction-boundary capture ([issue #1](https://github.com/AxialDB/ce-stream/issues/1)).
 Release notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md).
 
 ### Fixed
@@ -107,8 +107,9 @@ Release notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md).
 - Other database engines (Phase 6 parked).
 - Schema Registry / typed per-table Avro.
 
-[Unreleased]: https://github.com/ce-stream/ce-stream/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/ce-stream/ce-stream/releases/tag/v0.3.0
-[0.2.0]: https://github.com/ce-stream/ce-stream/releases/tag/v0.2.0
-[0.1.1]: https://github.com/ce-stream/ce-stream/releases/tag/v0.1.1
-[0.1.0]: https://github.com/ce-stream/ce-stream/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.0
+[0.3.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.3.0
+[0.2.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.2.0
+[0.1.1]: https://github.com/AxialDB/ce-stream/releases/tag/v0.1.1
+[0.1.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.1.0

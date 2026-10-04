@@ -10,7 +10,7 @@ Only the latest released version of ce-stream is supported for security fixes. P
 
 Prefer:
 
-1. [GitHub Security Advisories](https://github.com/ce-stream/ce-stream/security/advisories/new) (private report), or
+1. [GitHub Security Advisories](https://github.com/AxialDB/ce-stream/security/advisories/new) (private report), or
 2. Contact the maintainers via the [AxialDB](https://axialdb.com/) site if advisories are unavailable.
 
 Please include a short description, affected version/commit if known, and steps to reproduce when possible.

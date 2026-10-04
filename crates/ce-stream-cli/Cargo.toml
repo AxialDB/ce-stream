@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "../../README.md"
+keywords = ["cdc", "mysql", "mongodb", "cloudevents"]
+categories = ["command-line-utilities", "database"]
 # mongodb 3.9, via ce-stream-mongo, requires Rust 1.88.
 rust-version = "1.88"
 

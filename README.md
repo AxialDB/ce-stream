@@ -4,7 +4,7 @@ CloudEvents change streams from database logs.
 
 **Created and maintained by the [AxialDB](https://axialdb.com/) vendor** ([releases](https://github.com/AxialDB/releases)). Open-source under Apache-2.0 — not an AxialDB-only runtime; anyone can run it against MySQL 9.x or MongoDB 8.0+.
 
-[![CI](https://github.com/ce-stream/ce-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/ce-stream/ce-stream/actions/workflows/ci.yml)
+[![CI](https://github.com/AxialDB/ce-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/AxialDB/ce-stream/actions/workflows/ci.yml)
 
 **v1:** MySQL **9.x** ROW binlog and MongoDB **8.0+** change streams → CloudEvents 1.0 (JSON default; optional Avro). Kafka not required.  
 **Deferred:** other DB adapters — see [`docs/planning.md`](docs/planning.md). MongoDB shipped in [v0.4.0](docs/releases/v0.4.0.md) ([#5](https://github.com/AxialDB/ce-stream/issues/5)).
@@ -19,7 +19,13 @@ cargo build -p ce-stream-cli --release
 cargo run -p ce-stream-cli --release -- --config ce-stream.toml
 ```
 
-Install from git (crates.io publish comes later):
+Install the CLI from crates.io:
+
+```powershell
+cargo install ce-stream-cli
+```
+
+Until `v0.4.0` is on crates.io, install from the git tag:
 
 ```powershell
 cargo install --git https://github.com/AxialDB/ce-stream --locked --tag v0.4.0 ce-stream-cli
@@ -58,7 +64,7 @@ Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (r
 ```text
 ChangeSource (mysql|mongo) → include-list → CloudEvent → Sink (stdout|http; json|avro)
                               ↑
-                         Checkpoint (GTID)
+                         Checkpoint (GTID or resume token)
 ```
 
 ## License

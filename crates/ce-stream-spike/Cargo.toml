@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Vendored + SHOW BINARY LOG STATUS (MySQL 9.x); see vendor/.../PATCHES.md
-mysql-binlog-connector-rust = { path = "../../vendor/mysql-binlog-connector-rust", default-features = false, features = ["rustls"] }
+mysql-binlog-connector-rust = { workspace = true, default-features = false, features = ["rustls"] }
 async-std = { version = "1.12", features = ["attributes"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
