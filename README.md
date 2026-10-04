@@ -25,12 +25,6 @@ Install the CLI from crates.io:
 cargo install ce-stream-cli
 ```
 
-Until `v0.4.0` is on crates.io, install from the git tag:
-
-```powershell
-cargo install --git https://github.com/AxialDB/ce-stream --locked --tag v0.4.0 ce-stream-cli
-```
-
 Pre-built binaries: [GitHub Releases](https://github.com/AxialDB/ce-stream/releases) (`v0.4.0` - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no database).
 
 ### v0.4.0 highlights
