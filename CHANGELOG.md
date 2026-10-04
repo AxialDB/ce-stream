@@ -7,6 +7,32 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-04
+
+MongoDB change-stream capture ([issue #5](https://github.com/AxialDB/ce-stream/issues/5)).
+Release notes: [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md).
+
+### Added
+
+- `ce-stream-mongo`: MongoDB 8.0+ replica-set change streams (one node is enough). CLI `source.adapter = "mongo"`.
+- `CommittedTransaction.position` (`adapter`, `at`, `after`) and `control` events (`dropped`, `renamed`, `database_dropped`, `invalidated`).
+- Avro `ce-stream.committed-transaction.v2` for commits that carry a position or control events. Row events stay `cloudevent.v1`.
+- Seed helper: majority cluster time, then a majority cursor in batches of 512. The stream starts at that time.
+- Checkpoint payload: `resume_token`, `cluster_time`, `seed_cluster_time`. A missing resume token is `Error::HistoryLost`.
+- `IncludeList` / `IncludeFilter` live in `ce-stream-core`. `ce-stream-mysql` re-exports `IncludeList` until v0.5.
+
+### Changed
+
+- **Breaking (struct literals):** `CommittedTransaction` has `position` and `control`. MySQL leaves both empty, so MySQL JSON and Avro v1 output stay byte-identical to v0.3.0. Literals need `..Default::default()`.
+- CLI and `ce-stream-mongo` set `rust-version = "1.88"`. The workspace floor stays 1.75.
+
+### Notes
+
+- No server-side `$match`. The include list filters in this process and is pinned for one transaction.
+- `fullDocument = "required"` by default (post-images). `"update_lookup"` is the opt-out. Pre-images are never requested.
+- Drop or rename of a watched collection, plus dropDatabase and invalidate, end capture. A drop of an unwatched collection only advances the resume token.
+- Sharded clusters (`mongos`) and MongoDB older than 8.0 are out of scope. Live MongoDB tests stay out of CI.
+
 ## [0.3.0] - 2026-08-17
 
 Live include-list updates on a running capture session ([issue #3](https://github.com/ce-stream/ce-stream/issues/3)).

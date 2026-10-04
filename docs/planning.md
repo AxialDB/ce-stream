@@ -128,13 +128,13 @@ Location: [`scripts/perf/`](../scripts/perf/). Spec: [`docs/perf-harness.md`](pe
 
 ---
 
-## Phase 6 — Multi-DB adapters — **MongoDB in progress; others deferred**
+## Phase 6 — Multi-DB adapters — **MongoDB shipped in v0.4.0; others deferred**
 
 Same `ChangeSource` / CloudEvent envelope:
 
 | Adapter | Mechanism | Status |
 |---------|-----------|--------|
-| `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **In progress** ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
+| `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **Shipped** in v0.4.0 ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
 | `ce-stream-postgres` | Logical decoding / replication protocol (sketch) | Deferred |
 | `ce-stream-sqlite` | update hooks / session (different shape, sketch) | Deferred |
 | MSSQL | Prefer consuming **CES** if available; not a binlog clone (sketch) | Deferred |
@@ -168,4 +168,4 @@ Phase 0 → 1 (spike) → 2 (MVP) → 3 (HTTP E2E) → 4 (harden)
   → Phase 6: MongoDB (#5, v0.4.0); other DBs only if un-deferred
 ```
 
-**Now:** MongoDB change stream source ([#5](https://github.com/AxialDB/ce-stream/issues/5)). **Later:** crates.io publish.
+**Now:** tag v0.4.0 after merge. **Later:** crates.io publish. Postgres, SQLite, and MSSQL stay deferred.

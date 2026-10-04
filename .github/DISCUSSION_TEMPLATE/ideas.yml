@@ -26,5 +26,5 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: I understand v1 is MySQL 9.x, MongoDB 8.0+ is in progress, and other DBs are deferred
+        - label: I understand v1 is MySQL 9.x and MongoDB 8.0+, and other DBs are deferred
           required: true
