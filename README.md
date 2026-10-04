@@ -7,7 +7,7 @@ CloudEvents change streams from database logs.
 [![CI](https://github.com/AxialDB/ce-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/AxialDB/ce-stream/actions/workflows/ci.yml)
 
 **v1:** MySQL **9.x** ROW binlog and MongoDB **8.0+** change streams → CloudEvents 1.0 (JSON default; optional Avro). Kafka not required.  
-**Deferred:** other DB adapters — see [`docs/planning.md`](docs/planning.md). MongoDB shipped in [v0.4.0](docs/releases/v0.4.0.md) ([#5](https://github.com/AxialDB/ce-stream/issues/5)).
+**Deferred:** other DB adapters — see [`docs/planning.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/planning.md). MongoDB shipped in [v0.4.0](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.4.0.md) ([#5](https://github.com/AxialDB/ce-stream/issues/5)).
 
 ## Quick start
 
@@ -33,7 +33,7 @@ Pre-built binaries: [GitHub Releases](https://github.com/AxialDB/ce-stream/relea
 - **MySQL output unchanged** — JSON and Avro v1 stay byte-identical to v0.3.0.
 - **Avro v2** — commits that carry a position or control events.
 
-See [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md) and [`CHANGELOG.md`](CHANGELOG.md).
+See [`docs/releases/v0.4.0.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.4.0.md) and [`CHANGELOG.md`](https://github.com/AxialDB/ce-stream/blob/main/CHANGELOG.md).
 
 Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (required; validated at connect).
 
@@ -41,17 +41,17 @@ Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (r
 
 | Doc | Topic |
 |-----|--------|
-| [`docs/INDEX.md`](docs/INDEX.md) | Doc map |
-| [`docs/ops-e2e.md`](docs/ops-e2e.md) | Ops / continuous run |
-| [`docs/delivery.md`](docs/delivery.md) | At-least-once, backpressure |
-| [`docs/library.md`](docs/library.md) | Embed as a library |
-| [`docs/avro.md`](docs/avro.md) | Optional Avro |
-| [`docs/perf-harness.md`](docs/perf-harness.md) | Perf harness + lab results |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Bugs, PRs, Discussions |
-| [`SECURITY.md`](SECURITY.md) | Vulnerability reporting |
-| [`CHANGELOG.md`](CHANGELOG.md) | Releases |
-| [`docs/oss-readiness.md`](docs/oss-readiness.md) | Lean OSS MVP plan |
-| [`docs/planning.md`](docs/planning.md) | Internal phase status |
+| [`docs/INDEX.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/INDEX.md) | Doc map |
+| [`docs/ops-e2e.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/ops-e2e.md) | Ops / continuous run |
+| [`docs/delivery.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/delivery.md) | At-least-once, backpressure |
+| [`docs/library.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/library.md) | Embed as a library |
+| [`docs/avro.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/avro.md) | Optional Avro |
+| [`docs/perf-harness.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/perf-harness.md) | Perf harness + lab results |
+| [`CONTRIBUTING.md`](https://github.com/AxialDB/ce-stream/blob/main/CONTRIBUTING.md) | Bugs, PRs, Discussions |
+| [`SECURITY.md`](https://github.com/AxialDB/ce-stream/blob/main/SECURITY.md) | Vulnerability reporting |
+| [`CHANGELOG.md`](https://github.com/AxialDB/ce-stream/blob/main/CHANGELOG.md) | Releases |
+| [`docs/oss-readiness.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/oss-readiness.md) | Lean OSS MVP plan |
+| [`docs/planning.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/planning.md) | Internal phase status |
 
 ## Pipeline
 
@@ -63,5 +63,5 @@ ChangeSource (mysql|mongo) → include-list → CloudEvent → Sink (stdout|http
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).  
-Copyright notice: [`NOTICE`](NOTICE) (`Copyright 2026 AxialDB`).
+Licensed under the [Apache License, Version 2.0](https://github.com/AxialDB/ce-stream/blob/main/LICENSE).  
+Copyright notice: [`NOTICE`](https://github.com/AxialDB/ce-stream/blob/main/NOTICE) (`Copyright 2026 AxialDB`).

@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "ce-stream-core",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "apache-avro",
  "async-trait",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-mongo"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "ce-stream-core",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-mysql"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-std",
  "async-trait",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-perf-sink"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "clap",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "ce-stream-spike"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-std",
  "ce-stream-mysql-binlog",

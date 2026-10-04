@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-04
+
+Docs-only. No code or output changes from 0.4.0.
+
+### Fixed
+
+- README links are absolute. crates.io resolves relative links against each crate's folder, so every doc link on the 0.4.0 crate pages returned 404.
+
 ## [0.4.0] - 2026-10-04
 
 MongoDB change-stream capture ([issue #5](https://github.com/AxialDB/ce-stream/issues/5)).
@@ -107,7 +115,8 @@ Release notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md).
 - Other database engines (Phase 6 parked).
 - Schema Registry / typed per-table Avro.
 
-[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.1
 [0.4.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.0
 [0.3.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.3.0
 [0.2.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.2.0
