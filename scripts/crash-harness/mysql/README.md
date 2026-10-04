@@ -1,6 +1,6 @@
 # MySQL crash harness
 
-MySQL 9.x lab regression for [issue #1](https://github.com/ce-stream/ce-stream/issues/1).
+MySQL 9.x lab regression for [issue #1](https://github.com/AxialDB/ce-stream/issues/1).
 
 **How to run:** see the parent [`../README.md`](../README.md) for Windows, WSL, and AxialDB wrapper commands.
 

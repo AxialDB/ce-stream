@@ -1,4 +1,4 @@
-# Example config - MySQL 9.x only for v1
+# Example config. adapter = mysql (below) or mongo (see the commented block).
 # Copy to ce-stream.toml (gitignored) and set password.
 #
 # Production: run without --max-events (continuous). Prefer a replica host.
@@ -36,3 +36,20 @@ kind = "stdout"
 # Row mode + avro  -> ce-stream.cloudevent.v1 per message
 # Transaction mode + avro -> ce-stream.committed-transaction.v1 per commit
 format = "json"
+
+# MongoDB 8.0+ replica set. Post-images: collMod <coll> with changeStreamPreAndPostImages.
+# seed = true copies each include_tables collection, then tails from that cluster time.
+# sink.format = "avro" encodes row events as cloudevent-v1 and commits that carry a
+# position as committed-transaction-v2. MySQL commits stay on v1.
+#
+# [source]
+# adapter = "mongo"
+# source_id = "mongo://127.0.0.1:27017/app"
+# uri = "mongodb://127.0.0.1:27017/?replicaSet=rs0"
+# database = "app"
+# full_document = "required"
+# seed = false
+# payload_mode = "full"
+# delivery_unit = "transaction"
+# queue_capacity = 64
+# include_tables = ["app.orders"]

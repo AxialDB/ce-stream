@@ -29,7 +29,7 @@ format = "avro" # default: json
 | `format` | HTTP `Content-Type` | Body | Schema header |
 |----------|---------------------|------|---------------|
 | `json` (default) | `application/json` | `CommittedTransaction` JSON | — |
-| `avro` | `application/ce-stream.committed-transaction+avro` | Single Avro datum (no OCF) | `x-ce-stream-avro-schema: ce-stream.committed-transaction.v1` |
+| `avro` | `application/ce-stream.committed-transaction+avro` | Single Avro datum (no OCF) | `x-ce-stream-avro-schema: ce-stream.committed-transaction.v1` for a MySQL commit, `ce-stream.committed-transaction.v2` when the commit has a position or control events |
 
 Stdout + Avro prints **one base64 line per message** (binary on a TTY is hostile).
 
@@ -38,7 +38,8 @@ Stdout + Avro prints **one base64 line per message** (binary on a TTY is hostile
 Published copies (keep in sync):
 
 - [`schemas/cloudevent-v1.avsc`](../schemas/cloudevent-v1.avsc) — row CloudEvents
-- [`schemas/committed-transaction-v1.avsc`](../schemas/committed-transaction-v1.avsc) — transaction envelopes
+- [`schemas/committed-transaction-v1.avsc`](../schemas/committed-transaction-v1.avsc) — MySQL transaction envelopes
+- [`schemas/committed-transaction-v2.avsc`](../schemas/committed-transaction-v2.avsc) — commits with a source position or control events (MongoDB)
 - Embedded under [`crates/ce-stream-core/schemas/`](../crates/ce-stream-core/schemas/)
 
 ### `ce-stream.cloudevent.v1`

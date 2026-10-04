@@ -55,6 +55,22 @@ bash scripts/release/package-linux.sh 0.2.0
 .\scripts\release\build-release.ps1 -Version 0.2.0
 ```
 
+## crates.io
+
+Publish only after the `v0.4.0` tag is on `main`. `cargo publish` rewrites workspace path dependencies to versions, so each crate below must already be on crates.io before the next one. `ce-stream-spike` and `ce-stream-perf-sink` stay `publish = false`.
+
+```powershell
+cargo publish -p ce-stream-mysql-binlog
+cargo publish -p ce-stream-core
+cargo publish -p ce-stream-mysql
+cargo publish -p ce-stream-mongo
+cargo publish -p ce-stream-cli
+```
+
+`ce-stream-mysql-binlog` is the vendored MySQL connector (`lib` name stays `mysql_binlog_connector_rust`). The crates.io name `mysql-binlog-connector-rust` belongs to the upstream project and stops at 0.3.3, which does not have the MySQL 9.x status command.
+
+Dry-run one crate before publishing it: `cargo publish -p ce-stream-core --dry-run`.
+
 ## Post-release
 
 - [ ] Confirm the issue closed (`Fixes #N` on the merged PR, or close after the tag), and set `docs/issues/N.md` status to released.

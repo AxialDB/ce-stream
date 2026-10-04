@@ -7,11 +7,11 @@
 use mongodb::bson::{Bson, Document};
 
 pub fn document_to_json(doc: &Document) -> serde_json::Value {
-    Bson::Document(doc.clone()).into_canonical_extjson()
+    document_to_json_owned(doc.clone())
 }
 
-pub fn bson_to_json(value: Bson) -> serde_json::Value {
-    value.into_canonical_extjson()
+pub fn document_to_json_owned(doc: Document) -> serde_json::Value {
+    Bson::Document(doc).into_canonical_extjson()
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ body:
       value: |
         Ask how-to / usage questions here.
 
-        **Bugs** → [Issues](https://github.com/ce-stream/ce-stream/issues) (Bug report template).
-        **Security** → do not post here; see [SECURITY.md](https://github.com/ce-stream/ce-stream/blob/main/SECURITY.md).
+        **Bugs** → [Issues](https://github.com/AxialDB/ce-stream/issues) (Bug report template).
+        **Security** → do not post here; see [SECURITY.md](https://github.com/AxialDB/ce-stream/blob/main/SECURITY.md).
   - type: textarea
     id: question
     attributes:

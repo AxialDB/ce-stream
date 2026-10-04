@@ -6,13 +6,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "../../README.md"
+keywords = ["cdc", "mysql", "binlog", "cloudevents"]
+categories = ["database"]
 rust-version.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
 async-std = { version = "1.12", features = ["attributes"] }
 ce-stream-core = { workspace = true }
-mysql-binlog-connector-rust = { path = "../../vendor/mysql-binlog-connector-rust", default-features = false, features = ["rustls"] }
+mysql-binlog-connector-rust = { workspace = true, default-features = false, features = ["rustls"] }
 percent-encoding = "2.3"
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -5,7 +5,12 @@ use std::time::Instant;
 
 use ce_stream_core::event::{CloudEvent, PayloadMode, SinkFormat, TableRef};
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
+use ce_stream_core::transaction::{CommittedTransaction, SourcePosition};
 use ce_stream_core::{CheckpointStore, HttpSink, Sink, StdoutSink};
+use ce_stream_mongo::{
+    note_cluster_time, open_seed_cursor, read_seed_batch, FullDocumentMode,
+    MongoChangeStreamSource, MongoCheckpoint, MongoSourceOptions,
+};
 use ce_stream_mysql::{FileCheckpointStore, MysqlBinlogSource, MysqlSourceOptions};
 use clap::Parser;
 use serde::Deserialize;
@@ -41,13 +46,30 @@ struct FileConfig {
 struct SourceSection {
     adapter: String,
     source_id: String,
+    #[serde(default)]
     host: String,
+    #[serde(default)]
     port: u16,
+    #[serde(default)]
     user: String,
+    #[serde(default)]
     password: String,
+    #[serde(default)]
     server_id: u64,
     #[serde(default = "default_true")]
     tls: bool,
+    /// MongoDB connection string. Required when adapter = mongo.
+    #[serde(default)]
+    uri: String,
+    /// Database the change stream is opened on.
+    #[serde(default)]
+    database: String,
+    /// required (post-images) | update_lookup
+    #[serde(default = "default_full_document")]
+    full_document: String,
+    /// Copy included collections before tailing, fenced at cluster time T.
+    #[serde(default)]
+    seed: bool,
     include_tables: Vec<String>,
     /// full | signal
     #[serde(default = "default_payload_mode")]
@@ -93,6 +115,10 @@ fn default_queue_capacity() -> usize {
 
 fn default_sink_format() -> String {
     "json".into()
+}
+
+fn default_full_document() -> String {
+    "required".into()
 }
 
 enum OutSink {
@@ -161,31 +187,74 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let store = FileCheckpointStore {
         path: cfg.checkpoint.path.clone(),
     };
-    let checkpoint = store.load().await?;
-    if let Some(cp) = &checkpoint {
-        tracing::info!(gtid = ?cp.payload.get("gtid"), "loaded checkpoint");
-    } else {
-        tracing::info!("no checkpoint; starting from Latest");
-    }
+    let mut checkpoint = store.load().await?;
 
     tracing::info!(
         adapter = %cfg.source.adapter,
-        host = %cfg.source.host,
-        port = cfg.source.port,
-        server_id = cfg.source.server_id,
-        tls = cfg.source.tls,
         tables = ?cfg.source.include_tables,
         payload_mode = %cfg.source.payload_mode,
         delivery_unit = %cfg.source.delivery_unit,
-        queue_capacity = cfg.source.queue_capacity,
         sink = %cfg.sink.kind,
         sink_format = %cfg.sink.format,
         "ce-stream starting (continuous unless max-events set)"
     );
+    if sink_format == SinkFormat::Avro && delivery_unit == DeliveryUnit::Transaction {
+        tracing::info!(
+            schema = ce_stream_core::avro_encode::committed_transaction_schema_id(
+                &CommittedTransaction::default()
+            ),
+            "transaction avro uses v1 unless a commit carries position or control, then v2"
+        );
+    }
+
+    let config = SourceConfig {
+        source_id: cfg.source.source_id.clone(),
+        include_tables: include_tables.clone(),
+        payload_mode,
+        queue_capacity: cfg.source.queue_capacity,
+        delivery_unit,
+    };
+
+    if cfg.source.adapter == "mongo" {
+        let full_document = parse_full_document(&cfg.source.full_document)?;
+        if cfg.source.seed {
+            checkpoint = seed_mongo(
+                &cfg,
+                &include_tables,
+                &out,
+                payload_mode,
+                delivery_unit,
+                sink_format,
+                &store,
+                checkpoint,
+            )
+            .await?;
+        }
+        let mut source = MongoChangeStreamSource {
+            options: MongoSourceOptions {
+                uri: cfg.source.uri.clone(),
+                database: cfg.source.database.clone(),
+                full_document,
+            },
+            config,
+            checkpoint,
+            checkpoint_store: Some(Box::new(store)),
+            skip_gate_check: args.skip_gate_check,
+            include: Default::default(),
+        };
+        return capture(
+            &mut source,
+            delivery_unit,
+            &out,
+            sink_format,
+            args.max_events,
+        )
+        .await;
+    }
+
     tracing::info!(
         "tip: set binlog_row_metadata=FULL on MySQL for real column names; prefer a replica host"
     );
-
     let mut source = MysqlBinlogSource {
         options: MysqlSourceOptions {
             host: cfg.source.host,
@@ -195,34 +264,40 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             server_id: cfg.source.server_id,
             tls: cfg.source.tls,
         },
-        config: SourceConfig {
-            source_id: cfg.source.source_id,
-            include_tables,
-            payload_mode,
-            queue_capacity: cfg.source.queue_capacity,
-            delivery_unit,
-        },
+        config,
         checkpoint,
         checkpoint_store: Some(Box::new(store)),
         skip_gate_check: args.skip_gate_check,
         include: Default::default(),
     };
+    capture(
+        &mut source,
+        delivery_unit,
+        &out,
+        sink_format,
+        args.max_events,
+    )
+    .await
+}
 
+async fn capture<S: ChangeSource>(
+    source: &mut S,
+    delivery_unit: DeliveryUnit,
+    out: &OutSink,
+    sink_format: SinkFormat,
+    max: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let emitted = Arc::new(AtomicU64::new(0));
-    let max = args.max_events;
     let emitted_cb = Arc::clone(&emitted);
     let started = Instant::now();
     let handle = tokio::runtime::Handle::current();
-    let sink_format_for_txn = sink_format;
 
     let run_result = if delivery_unit == DeliveryUnit::Row {
         source
             .run(|ev: CloudEvent| {
-                emit_row(&out, &handle, &ev)?;
-
+                emit_row(out, &handle, &ev)?;
                 let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
                 log_row_health(n, &ev, &started);
-
                 if max > 0 && n >= max {
                     return Err(ce_stream_core::Error::Source(format!(
                         "reached max_events={max}"
@@ -234,20 +309,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         source
             .run_transactions(|txn| {
-                emit_transaction(&out, &handle, &txn, sink_format_for_txn)?;
-
+                emit_transaction(out, &handle, &txn, sink_format)?;
                 let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
-                if n == 1 || n % 100 == 0 {
+                if n == 1 || n.is_multiple_of(100) {
                     tracing::info!(
                         target: "ce_stream::health",
                         commits_total = n,
-                        last_gtid = %txn.gtid,
                         rows_in_commit = txn.events.len(),
                         uptime_secs = started.elapsed().as_secs(),
                         "capture health"
                     );
                 }
-
                 if max > 0 && n >= max {
                     return Err(ce_stream_core::Error::Source(format!(
                         "reached max_events={max}"
@@ -271,8 +343,79 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Err(e)
         }
     })?;
-
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_mongo(
+    cfg: &FileConfig,
+    tables: &[TableRef],
+    out: &OutSink,
+    payload_mode: PayloadMode,
+    delivery_unit: DeliveryUnit,
+    sink_format: SinkFormat,
+    store: &FileCheckpointStore,
+    existing: Option<ce_stream_core::Checkpoint>,
+) -> Result<Option<ce_stream_core::Checkpoint>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(cp) = &existing {
+        if let Some(stored) = MongoCheckpoint::from_checkpoint(cp) {
+            if !stored.resume_token.is_null() {
+                tracing::info!("checkpoint has a resume token; skipping seed");
+                return Ok(existing);
+            }
+        }
+    }
+    let client = mongodb::Client::with_uri_str(&cfg.source.uri).await?;
+    let cluster_time = note_cluster_time(&client).await?;
+    tracing::info!(t = cluster_time.t, i = cluster_time.i, "seed fence");
+    let handle = tokio::runtime::Handle::current();
+    let payload = MongoCheckpoint {
+        resume_token: serde_json::Value::Null,
+        cluster_time: Some(cluster_time),
+        seed_cluster_time: Some(cluster_time),
+    }
+    .to_checkpoint()
+    .payload;
+    for table in tables {
+        let mut cursor = open_seed_cursor(&client, &table.database, &table.table).await?;
+        loop {
+            let events = read_seed_batch(
+                &mut cursor,
+                &cfg.source.source_id,
+                table,
+                cluster_time,
+                payload_mode,
+            )
+            .await?;
+            if events.is_empty() {
+                break;
+            }
+            if delivery_unit == DeliveryUnit::Row {
+                for ev in &events {
+                    emit_row(out, &handle, ev)?;
+                }
+            } else {
+                let txn = CommittedTransaction {
+                    position: Some(SourcePosition {
+                        adapter: "mongo".into(),
+                        at: payload.clone(),
+                        after: payload.clone(),
+                    }),
+                    events,
+                    ..Default::default()
+                };
+                emit_transaction(out, &handle, &txn, sink_format)?;
+            }
+        }
+    }
+    let cp = MongoCheckpoint {
+        resume_token: serde_json::Value::Null,
+        cluster_time: Some(cluster_time),
+        seed_cluster_time: Some(cluster_time),
+    }
+    .to_checkpoint();
+    store.save(&cp).await?;
+    Ok(Some(cp))
 }
 
 fn emit_row(
@@ -318,7 +461,7 @@ fn log_row_health(n: u64, ev: &CloudEvent, started: &Instant) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let lag_ms = event_lag_ms(ev);
-    if n == 1 || n % 100 == 0 {
+    if n == 1 || n.is_multiple_of(100) {
         tracing::info!(
             target: "ce_stream::health",
             events_total = n,
@@ -367,24 +510,25 @@ fn parse_sink_format(s: &str) -> Result<SinkFormat, String> {
     }
 }
 
+fn parse_full_document(s: &str) -> Result<FullDocumentMode, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "required" => Ok(FullDocumentMode::Required),
+        "update_lookup" => Ok(FullDocumentMode::UpdateLookup),
+        other => Err(format!(
+            "source.full_document must be required|update_lookup, got {other}"
+        )),
+    }
+}
+
 fn validate_config(cfg: &FileConfig) -> Result<(), String> {
-    if cfg.source.adapter != "mysql" {
-        return Err(format!(
-            "unsupported source.adapter: {} (v1 supports mysql only)",
-            cfg.source.adapter
-        ));
-    }
-    if cfg.source.host.trim().is_empty() {
-        return Err("source.host must not be empty".into());
-    }
-    if cfg.source.port == 0 {
-        return Err("source.port must be > 0".into());
-    }
-    if cfg.source.user.trim().is_empty() {
-        return Err("source.user must not be empty".into());
-    }
-    if cfg.source.server_id == 0 {
-        return Err("source.server_id must be a unique non-zero replica id".into());
+    match cfg.source.adapter.as_str() {
+        "mysql" => validate_mysql(cfg)?,
+        "mongo" => validate_mongo(cfg)?,
+        other => {
+            return Err(format!(
+                "unsupported source.adapter: {other} (mysql or mongo)"
+            ));
+        }
     }
     if cfg.source.include_tables.is_empty() {
         return Err("source.include_tables must list at least one database.table".into());
@@ -398,9 +542,6 @@ fn validate_config(cfg: &FileConfig) -> Result<(), String> {
     parse_payload_mode(&cfg.source.payload_mode)?;
     parse_delivery_unit(&cfg.source.delivery_unit)?;
     parse_sink_format(&cfg.sink.format)?;
-    if !cfg.source.tls {
-        tracing::warn!("source.tls=false; TLS is recommended for production capture");
-    }
     match cfg.sink.kind.as_str() {
         "stdout" => {}
         "http" => {
@@ -416,6 +557,47 @@ fn validate_config(cfg: &FileConfig) -> Result<(), String> {
         }
         other => {
             return Err(format!("unsupported sink.kind: {other} (use stdout|http)"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_mysql(cfg: &FileConfig) -> Result<(), String> {
+    if cfg.source.host.trim().is_empty() {
+        return Err("source.host must not be empty".into());
+    }
+    if cfg.source.port == 0 {
+        return Err("source.port must be > 0".into());
+    }
+    if cfg.source.user.trim().is_empty() {
+        return Err("source.user must not be empty".into());
+    }
+    if cfg.source.server_id == 0 {
+        return Err("source.server_id must be a unique non-zero replica id".into());
+    }
+    if !cfg.source.tls {
+        tracing::warn!("source.tls=false; TLS is recommended for production capture");
+    }
+    Ok(())
+}
+
+fn validate_mongo(cfg: &FileConfig) -> Result<(), String> {
+    if cfg.source.uri.trim().is_empty() {
+        return Err("source.uri must be a MongoDB connection string".into());
+    }
+    if cfg.source.database.trim().is_empty() {
+        return Err("source.database must be the database to watch".into());
+    }
+    parse_full_document(&cfg.source.full_document)?;
+    for entry in &cfg.source.include_tables {
+        let (db, _) = entry.split_once('.').ok_or_else(|| {
+            format!("include_tables entry must be database.collection, got {entry}")
+        })?;
+        if db != cfg.source.database {
+            return Err(format!(
+                "include_tables entry {entry} is not in source.database {}",
+                cfg.source.database
+            ));
         }
     }
     Ok(())

@@ -6,9 +6,9 @@ Thanks for your interest. ce-stream is created and maintained by the [AxialDB](h
 
 | Intent | Channel |
 |--------|---------|
-| Question / how-to | [Discussions → Q&A](https://github.com/ce-stream/ce-stream/discussions/new?category=q-a) |
-| Bug | [GitHub Issues](https://github.com/ce-stream/ce-stream/issues) (use the Bug report template) |
-| Feature idea | [Discussions → Ideas](https://github.com/ce-stream/ce-stream/discussions/new?category=ideas); we open an Issue only if it goes on the roadmap |
+| Question / how-to | [Discussions → Q&A](https://github.com/AxialDB/ce-stream/discussions/new?category=q-a) |
+| Bug | [GitHub Issues](https://github.com/AxialDB/ce-stream/issues) (use the Bug report template) |
+| Feature idea | [Discussions → Ideas](https://github.com/AxialDB/ce-stream/discussions/new?category=ideas); we open an Issue only if it goes on the roadmap |
 | Security vulnerability | See [`SECURITY.md`](SECURITY.md) — **not** a public Issue |
 | Code change | Pull request from a fork |
 

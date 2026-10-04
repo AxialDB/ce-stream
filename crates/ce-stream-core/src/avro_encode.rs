@@ -2,7 +2,8 @@
 //!
 //! Schemas:
 //! - `schemas/cloudevent-v1.avsc` (id `ce-stream.cloudevent.v1`)
-//! - `schemas/committed-transaction-v1.avsc` (id `ce-stream.committed-transaction.v1`)
+//! - `schemas/committed-transaction-v1.avsc` (id `ce-stream.committed-transaction.v1`) — MySQL commits
+//! - `schemas/committed-transaction-v2.avsc` (id `ce-stream.committed-transaction.v2`) — commits with position or control
 //!
 //! Wire: single Avro datum (no OCF). Schema Registry is out of scope.
 
@@ -18,8 +19,11 @@ use crate::transaction::{CommittedTransaction, DdlStatement};
 /// Stable schema identifier for row CloudEvents (not a Confluent Schema Registry id).
 pub const SCHEMA_ID: &str = "ce-stream.cloudevent.v1";
 
-/// Stable schema identifier for committed transaction envelopes.
+/// Stable schema identifier for MySQL committed transaction envelopes.
 pub const COMMITTED_TRANSACTION_SCHEMA_ID: &str = "ce-stream.committed-transaction.v1";
+
+/// Stable schema identifier for commits that carry a source position or control events.
+pub const COMMITTED_TRANSACTION_V2_SCHEMA_ID: &str = "ce-stream.committed-transaction.v2";
 
 /// HTTP Content-Type for Avro-encoded CloudEvents.
 pub const CONTENT_TYPE_AVRO: &str = "application/cloudevents+avro";
@@ -35,6 +39,10 @@ pub const SCHEMA_JSON: &str = include_str!("../schemas/cloudevent-v1.avsc");
 pub const COMMITTED_TRANSACTION_SCHEMA_JSON: &str =
     include_str!("../schemas/committed-transaction-v1.avsc");
 
+/// Embedded copy of `schemas/committed-transaction-v2.avsc`.
+pub const COMMITTED_TRANSACTION_V2_SCHEMA_JSON: &str =
+    include_str!("../schemas/committed-transaction-v2.avsc");
+
 fn cloudevent_schema() -> &'static Schema {
     static SCHEMA: OnceLock<Schema> = OnceLock::new();
     SCHEMA.get_or_init(|| {
@@ -48,6 +56,27 @@ fn committed_transaction_schema() -> &'static Schema {
         Schema::parse_str(COMMITTED_TRANSACTION_SCHEMA_JSON)
             .expect("embedded committed-transaction-v1.avsc must parse")
     })
+}
+
+fn committed_transaction_v2_schema() -> &'static Schema {
+    static SCHEMA: OnceLock<Schema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Schema::parse_str(COMMITTED_TRANSACTION_V2_SCHEMA_JSON)
+            .expect("embedded committed-transaction-v2.avsc must parse")
+    })
+}
+
+fn uses_v2(txn: &CommittedTransaction) -> bool {
+    txn.position.is_some() || !txn.control.is_empty()
+}
+
+/// Schema id `encode_committed_transaction` will use for this commit.
+pub fn committed_transaction_schema_id(txn: &CommittedTransaction) -> &'static str {
+    if uses_v2(txn) {
+        COMMITTED_TRANSACTION_V2_SCHEMA_ID
+    } else {
+        COMMITTED_TRANSACTION_SCHEMA_ID
+    }
 }
 
 fn cloud_event_to_value(event: &CloudEvent) -> Result<Value> {
@@ -135,15 +164,18 @@ pub fn decode_cloudevent(bytes: &[u8]) -> Result<CloudEvent> {
 
 /// Encode a committed transaction as a single Avro binary datum.
 ///
-/// `committed-transaction-v1` carries MySQL commits only. A commit with
-/// `position` or `control` set is refused rather than encoded without them.
+/// MySQL commits (no position, no control) use `committed-transaction-v1`.
+/// Anything else uses `committed-transaction-v2`, which keeps the position and
+/// control events. Row CloudEvents stay on `cloudevent-v1` either way.
 pub fn encode_committed_transaction(txn: &CommittedTransaction) -> Result<Vec<u8>> {
-    if txn.position.is_some() || !txn.control.is_empty() {
-        let adapter = txn.source_position().adapter;
-        return Err(Error::Sink(format!(
-            "avro committed-transaction-v1 carries MySQL commits only; use JSON for adapter {adapter}"
-        )));
+    if uses_v2(txn) {
+        encode_committed_transaction_v2(txn)
+    } else {
+        encode_committed_transaction_v1(txn)
     }
+}
+
+fn encode_committed_transaction_v1(txn: &CommittedTransaction) -> Result<Vec<u8>> {
     let ddl: Result<Vec<_>> = txn.ddl.iter().map(|s| Ok(ddl_to_value(s))).collect();
     let events: Result<Vec<_>> = txn.events.iter().map(cloud_event_to_value).collect();
 
@@ -159,6 +191,66 @@ pub fn encode_committed_transaction(txn: &CommittedTransaction) -> Result<Vec<u8
 
     to_avro_datum(committed_transaction_schema(), value)
         .map_err(|e| Error::Sink(format!("avro encode committed transaction: {e}")))
+}
+
+fn encode_committed_transaction_v2(txn: &CommittedTransaction) -> Result<Vec<u8>> {
+    let (adapter, at, after) = match &txn.position {
+        Some(position) => (
+            position.adapter.clone(),
+            serde_json::to_string(&position.at)?,
+            serde_json::to_string(&position.after)?,
+        ),
+        None => ("mysql".to_string(), "{}".to_string(), "{}".to_string()),
+    };
+    let control_json = serde_json::to_string(&txn.control)?;
+    let ddl: Result<Vec<_>> = txn.ddl.iter().map(|s| Ok(ddl_to_value(s))).collect();
+    let events: Result<Vec<_>> = txn.events.iter().map(cloud_event_to_value).collect();
+
+    let value = Value::Record(vec![
+        ("adapter".into(), Value::String(adapter)),
+        ("position_at_json".into(), Value::String(at)),
+        ("position_after_json".into(), Value::String(after)),
+        ("gtid".into(), Value::String(txn.gtid.clone())),
+        (
+            "gtid_set_after".into(),
+            Value::String(txn.gtid_set_after.clone()),
+        ),
+        ("ddl".into(), Value::Array(ddl?)),
+        ("control_json".into(), Value::String(control_json)),
+        ("events".into(), Value::Array(events?)),
+    ]);
+
+    to_avro_datum(committed_transaction_v2_schema(), value)
+        .map_err(|e| Error::Sink(format!("avro encode committed transaction v2: {e}")))
+}
+
+/// Decode a v2 datum. v1 bytes are not accepted here.
+pub fn decode_committed_transaction_v2(bytes: &[u8]) -> Result<CommittedTransaction> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value = from_avro_datum(committed_transaction_v2_schema(), &mut cursor, None)
+        .map_err(|e| Error::Sink(format!("avro decode committed transaction v2: {e}")))?;
+    let Value::Record(fields) = value else {
+        return Err(Error::Sink(
+            "avro decode committed transaction v2: expected record".into(),
+        ));
+    };
+    let adapter = get_string_field(&fields, "adapter")?;
+    let at: serde_json::Value =
+        serde_json::from_str(&get_string_field(&fields, "position_at_json")?)
+            .map_err(|e| Error::Sink(format!("avro decode position_at_json: {e}")))?;
+    let after: serde_json::Value =
+        serde_json::from_str(&get_string_field(&fields, "position_after_json")?)
+            .map_err(|e| Error::Sink(format!("avro decode position_after_json: {e}")))?;
+    let control = serde_json::from_str(&get_string_field(&fields, "control_json")?)
+        .map_err(|e| Error::Sink(format!("avro decode control_json: {e}")))?;
+    Ok(CommittedTransaction {
+        gtid: get_string_field(&fields, "gtid")?,
+        gtid_set_after: get_string_field(&fields, "gtid_set_after")?,
+        position: Some(crate::transaction::SourcePosition { adapter, at, after }),
+        ddl: decode_ddl_array(&fields)?,
+        control,
+        events: decode_events_array(&fields)?,
+    })
 }
 
 /// Decode a single Avro datum back to a committed transaction.
@@ -268,17 +360,43 @@ mod tests {
     }
 
     #[test]
-    fn avro_refuses_non_mysql_commit() {
+    fn mysql_commit_stays_on_avro_v1() {
+        let txn = sample_committed_txn();
+        assert_eq!(
+            committed_transaction_schema_id(&txn),
+            COMMITTED_TRANSACTION_SCHEMA_ID
+        );
+        let bytes = encode_committed_transaction(&txn).unwrap();
+        assert!(decode_committed_transaction_v2(&bytes).is_err());
+    }
+
+    #[test]
+    fn mongo_commit_roundtrips_avro_v2() {
+        use crate::transaction::{ControlEvent, ControlKind, SourcePosition};
         let txn = CommittedTransaction {
-            position: Some(crate::transaction::SourcePosition {
+            position: Some(SourcePosition {
                 adapter: "mongo".into(),
-                at: serde_json::json!({}),
-                after: serde_json::json!({}),
+                at: serde_json::json!({"resume_token": {"_data": "a"}}),
+                after: serde_json::json!({"resume_token": {"_data": "b"}}),
             }),
+            control: vec![ControlEvent {
+                kind: ControlKind::Dropped,
+                subject: TableRef::new("app", "orders"),
+                renamed_to: None,
+            }],
+            events: vec![sample_row_event(1)],
             ..Default::default()
         };
-        let err = encode_committed_transaction(&txn).unwrap_err().to_string();
-        assert!(err.contains("adapter mongo"), "{err}");
+        assert_eq!(
+            committed_transaction_schema_id(&txn),
+            COMMITTED_TRANSACTION_V2_SCHEMA_ID
+        );
+        let bytes = encode_committed_transaction(&txn).unwrap();
+        let back = decode_committed_transaction_v2(&bytes).unwrap();
+        assert_eq!(back.position.unwrap().after["resume_token"]["_data"], "b");
+        assert_eq!(back.control[0].kind, ControlKind::Dropped);
+        assert_eq!(back.events.len(), 1);
+        assert!(back.gtid.is_empty());
     }
 
     #[test]

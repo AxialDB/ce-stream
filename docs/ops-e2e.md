@@ -81,7 +81,7 @@ Uses `--max-events 1` and a local HttpListener (emitter + catcher in one script)
 
 ## Regression: mid-transaction crash (Gate 0)
 
-Validates [#1](https://github.com/ce-stream/ce-stream/issues/1): kill ce-stream after the first row of a 3-row commit is delivered; checkpoint must not advance; restart must redeliver the full transaction.
+Validates [#1](https://github.com/AxialDB/ce-stream/issues/1): kill ce-stream after the first row of a 3-row commit is delivered; checkpoint must not advance; restart must redeliver the full transaction.
 
 **AxialDB harness** (MySQL 9.x lab, Windows or WSL):
 
