@@ -1,7 +1,10 @@
 //! MongoDB 8.0+ change streams → [`ce_stream_core::CloudEvent`].
 //!
-//! The stream is one cursor on the source database. Include-list changes are applied in this
-//! process, so adding a collection does not reopen the cursor. Live tests are not part of CI.
+//! The stream is one cursor on the source database. A finite include list is sent to the server
+//! as a `$match`, so writes to other collections are neither looked up nor sent. When the list
+//! gains a collection the cursor is opened again at its last position with the wider filter;
+//! [`ce_stream_core::include::IncludeList::in_effect_allows`] says when that has happened.
+//! Live tests are not part of CI.
 
 // See `ce-stream-core`: async_trait vs clippy 1.99 `double_must_use`.
 #![allow(clippy::double_must_use)]

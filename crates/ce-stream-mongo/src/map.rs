@@ -1,8 +1,9 @@
 //! Change-stream events to row CloudEvents or control events.
 //!
-//! The stream is opened on the whole database with no server-side `$match`. A `$match` fixed at
-//! start would hide collections added to the include list later. Filtering is client-side, in
-//! [`crate::group`].
+//! The stream is opened on the whole database. A finite include list is also a server-side
+//! `$match` (see `source.rs`), which is widened by reopening the stream when the list gains a
+//! collection. The filter in [`crate::group`] stays: it pins the list for one transaction and
+//! drops what a list that has shrunk since the stream was opened still lets through.
 
 use ce_stream_core::event::{ChangeOp, CloudEvent, PayloadMode, TableRef};
 use ce_stream_core::transaction::{ControlEvent, ControlKind};
