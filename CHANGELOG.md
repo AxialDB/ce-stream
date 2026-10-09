@@ -7,6 +7,33 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-09
+
+Mongo: server-side include filter ([issue #9](https://github.com/AxialDB/ce-stream/issues/9)).
+Release notes: [`docs/releases/v0.4.2.md`](docs/releases/v0.4.2.md).
+
+### Fixed
+
+- Mongo: an update or replace in a collection that is not in `include_tables` and has no post-images ended the stream under `full_document = "required"`, and a restart failed on the same event. A finite include list is now a server-side `$match`, so the server neither looks up nor sends the writes of other collections.
+- Mongo: a bulk load into a collection that is not listed no longer delays the listed ones. The server leaves those writes out.
+
+### Added
+
+- `IncludeList::set_in_effect`, `in_effect`, and `in_effect_allows` in `ce-stream-core`: the list an adapter's open stream filters by at the source. The Mongo source reports it after each open and clears it when capture ends. The MySQL adapter reports nothing.
+- `ClusterTime::of_resume_token`.
+
+### Changed
+
+- Mongo: when the include list gains a collection, the change stream is opened again at its last position with the wider filter. Changes to the new collection are delivered from the moment `in_effect_allows` is true for it, not from the next transaction after `insert` or `replace`. An embedder that copies a collection and then applies its changes waits for that before the copy.
+- Mongo: writes to collections that are not listed no longer arrive as commits without events. To keep the checkpoint moving, an empty batch whose position has moved is delivered as a commit with no events.
+- Mongo: `drop` and `rename` of a collection that is not listed are no longer seen at all. They only advanced the resume token before.
+- Mongo: `maxAwaitTimeMS` is 250 ms.
+
+### Notes
+
+- An empty `include_tables` (every table) keeps the unfiltered stream, and with it the post-image requirement for every collection of the database.
+- Live MongoDB tests stay out of CI: `crates/ce-stream-mongo/tests/server_filter_live.rs`.
+
 ## [0.4.1] - 2026-10-04
 
 Docs-only. No code or output changes from 0.4.0.
