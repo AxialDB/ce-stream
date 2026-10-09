@@ -45,6 +45,7 @@ impl IncludeFilter {
 struct Inner {
     filter: IncludeFilter,
     initialized: bool,
+    in_effect: Option<IncludeFilter>,
 }
 
 /// Cloneable handle to the capture include list (`database.table` subjects).
@@ -57,6 +58,12 @@ struct Inner {
 /// that, [`Self::remove`] of the last table or [`Self::replace`] with an empty
 /// list means **no** row events (empty commits still flow). MySQL DDL Query
 /// events are not filtered (same as v0.2.0).
+///
+/// An adapter that filters at its source (Mongo, with a server-side `$match`)
+/// reports the list its open stream uses through [`Self::set_in_effect`]. An
+/// embedder that must not miss the first change of a table it just added waits
+/// for [`Self::in_effect_allows`]. The MySQL adapter filters in this process
+/// and reports nothing.
 #[derive(Clone, Debug)]
 pub struct IncludeList {
     inner: Arc<RwLock<Inner>>,
@@ -76,6 +83,7 @@ impl IncludeList {
             inner: Arc::new(RwLock::new(Inner {
                 filter: IncludeFilter::All,
                 initialized: false,
+                in_effect: None,
             })),
         }
     }
@@ -126,6 +134,26 @@ impl IncludeList {
     /// True when this list currently delivers every table.
     pub fn is_all(&self) -> bool {
         matches!(self.read().filter, IncludeFilter::All)
+    }
+
+    /// For adapters: the list the open stream filters by at the source, or
+    /// `None` when no stream is open.
+    pub fn set_in_effect(&self, filter: Option<IncludeFilter>) {
+        self.write().in_effect = filter;
+    }
+
+    /// The list an adapter last reported with [`Self::set_in_effect`].
+    pub fn in_effect(&self) -> Option<IncludeFilter> {
+        self.read().in_effect.clone()
+    }
+
+    /// True once the open stream delivers this `database.table`. Always false
+    /// for an adapter that does not report.
+    pub fn in_effect_allows(&self, subject: &str) -> bool {
+        self.read()
+            .in_effect
+            .as_ref()
+            .is_some_and(|filter| filter.row_allowed(subject))
     }
 
     /// Replace the whole list. Empty input means no row events (not all tables).
@@ -243,6 +271,21 @@ mod tests {
         list.remove(&TableRef::new("demo", "orders"));
         assert!(!list.is_all());
         assert!(!list.snapshot_filter().row_allowed("demo.orders"));
+    }
+
+    #[test]
+    fn in_effect_is_what_the_adapter_reported() {
+        let list = IncludeList::from_subjects(["demo.orders"]);
+        assert!(!list.in_effect_allows("demo.orders"));
+        let adapter = list.clone();
+        adapter.set_in_effect(Some(list.snapshot_filter()));
+        list.insert(TableRef::new("demo", "late"));
+        assert!(list.in_effect_allows("demo.orders"));
+        assert!(!list.in_effect_allows("demo.late"));
+        adapter.set_in_effect(Some(list.snapshot_filter()));
+        assert!(list.in_effect_allows("demo.late"));
+        adapter.set_in_effect(None);
+        assert!(!list.in_effect_allows("demo.orders"));
     }
 
     #[test]

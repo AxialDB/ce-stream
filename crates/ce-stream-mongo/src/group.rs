@@ -25,6 +25,8 @@ pub struct Emit {
 pub struct TxnGrouper {
     seed_cluster_time: Option<ClusterTime>,
     open: Option<OpenGroup>,
+    /// The last position handed out, so an idle stream reports a new one only when it moved.
+    last_after: Option<Value>,
 }
 
 struct OpenGroup {
@@ -44,6 +46,7 @@ impl TxnGrouper {
         Self {
             seed_cluster_time,
             open: None,
+            last_after: None,
         }
     }
 
@@ -67,12 +70,33 @@ impl TxnGrouper {
         }
     }
 
-    /// An empty `next_if_any` batch. Closes an open transaction.
+    /// An empty `next_if_any` batch. Closes an open transaction. With none open, a token that
+    /// has moved is handed out as a commit with no events: the server-side filter leaves out
+    /// the writes of other collections, and the position has to pass them all the same, or a
+    /// restart would read from a place the oplog may no longer hold.
     pub fn on_batch_boundary(&mut self, post_batch_token: Option<Value>) -> Vec<Emit> {
-        if self.open.is_none() {
+        if self.open.is_some() {
+            return self.flush(post_batch_token);
+        }
+        let Some(token) = post_batch_token else {
+            return Vec::new();
+        };
+        if self.last_after.as_ref() == Some(&token) {
             return Vec::new();
         }
-        self.flush(post_batch_token)
+        let time = ClusterTime::of_resume_token(&token);
+        let group = OpenGroup {
+            key: String::new(),
+            filter: IncludeFilter::All,
+            events: Vec::new(),
+            control: Vec::new(),
+            first_token: token.clone(),
+            first_time: time,
+            last_token: token,
+            last_time: time,
+            stop: false,
+        };
+        vec![self.finish(group, None)]
     }
 
     fn start(&mut self, key: String, incoming: Incoming, filter: &IncludeFilter) {
@@ -102,7 +126,7 @@ impl TxnGrouper {
         group.apply(incoming);
     }
 
-    fn single(&self, incoming: Incoming, filter: &IncludeFilter) -> Emit {
+    fn single(&mut self, incoming: Incoming, filter: &IncludeFilter) -> Emit {
         let mut group = OpenGroup {
             key: String::new(),
             filter: filter.clone(),
@@ -125,9 +149,10 @@ impl TxnGrouper {
         }
     }
 
-    fn finish(&self, group: OpenGroup, after_token: Option<Value>) -> Emit {
+    fn finish(&mut self, group: OpenGroup, after_token: Option<Value>) -> Emit {
         let after_token = after_token.unwrap_or(group.last_token.clone());
         let after_time = group.last_time;
+        self.last_after = Some(after_token.clone());
         let position = SourcePosition {
             adapter: crate::checkpoint::ADAPTER.into(),
             at: MongoCheckpoint {
@@ -277,6 +302,28 @@ mod tests {
             out[0].txn.position.as_ref().unwrap().after["seed_cluster_time"],
             json!({"t": 4, "i": 0})
         );
+        assert!(g.on_batch_boundary(None).is_empty());
+    }
+
+    #[test]
+    fn an_idle_batch_hands_out_a_position_that_moved_and_only_once() {
+        let mut g = TxnGrouper::new(Some(ClusterTime { t: 4, i: 0 }));
+        g.push(raw(ChangeOpKind::Insert, "a", None, "orders"), &orders());
+        // The same place as the last commit: nothing new to say.
+        assert!(g.on_batch_boundary(Some(json!({"_data": "a"}))).is_empty());
+        let moved = json!({"_data": "826AC91BAF00000004"});
+        let out = g.on_batch_boundary(Some(moved.clone()));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].txn.events.is_empty());
+        assert!(!out[0].stop);
+        let position = out[0].txn.position.as_ref().unwrap();
+        assert_eq!(position.after["resume_token"], moved);
+        assert_eq!(
+            position.after["cluster_time"],
+            json!({"t": 0x6AC9_1BAFu32, "i": 4})
+        );
+        assert_eq!(position.after["seed_cluster_time"], json!({"t": 4, "i": 0}));
+        assert!(g.on_batch_boundary(Some(moved)).is_empty());
         assert!(g.on_batch_boundary(None).is_empty());
     }
 
