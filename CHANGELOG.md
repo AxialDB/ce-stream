@@ -14,6 +14,7 @@ Release notes: [`docs/releases/v0.4.2.md`](docs/releases/v0.4.2.md).
 
 ### Fixed
 
+- Mongo: capture resumes from a position on a collection that has left the include list ([issue #11](https://github.com/AxialDB/ce-stream/issues/11)). The filter of #9 hid the event the stream resumes after, and the server refused the resume. Never released.
 - Mongo: an update or replace in a collection that is not in `include_tables` and has no post-images ended the stream under `full_document = "required"`, and a restart failed on the same event. A finite include list is now a server-side `$match`, so the server neither looks up nor sends the writes of other collections.
 - Mongo: a bulk load into a collection that is not listed no longer delays the listed ones. The server leaves those writes out.
 

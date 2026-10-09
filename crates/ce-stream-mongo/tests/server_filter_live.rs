@@ -259,16 +259,47 @@ async fn scenario(uri: &str) {
     let (rows, _) = capture.next_rows().await;
     assert_eq!(rows, vec![("items".to_string(), 20)]);
 
-    // 5. Dropping a collection on the list still ends capture with a control event.
-    items.drop().await.expect("drop items");
-    let (_, txn) = capture.next_rows().await;
-    assert_eq!(txn.control.len(), 1);
+    // 5. The list loses the collection of the last event read and gains another in one
+    //    step. The stream is opened again after an event its new filter leaves out.
+    db.create_collection("third").await.expect("create third");
+    db.run_command(doc! {
+        "collMod": "third",
+        "changeStreamPreAndPostImages": { "enabled": true },
+    })
+    .await
+    .expect("enable post-images");
+    let third = db.collection::<Document>("third");
+    late.insert_one(doc! { "_id": 30 }).await.expect("insert");
+    let (rows, _) = capture.next_rows().await;
+    assert_eq!(rows, vec![("late".to_string(), 30)]);
+    capture
+        .include
+        .replace([TableRef::new(DB, "items"), TableRef::new(DB, "third")]);
+    capture.follows("third").await;
+    late.insert_one(doc! { "_id": 31 }).await.expect("insert");
+    third.insert_one(doc! { "_id": 32 }).await.expect("insert");
+    let (rows, _) = capture.next_rows().await;
+    assert_eq!(rows, vec![("third".to_string(), 32)]);
+
+    // 6. Dropping a collection on the list ends capture with a control event.
+    third.drop().await.expect("drop third");
+    let (_, dropped) = capture.next_rows().await;
+    assert_eq!(dropped.control.len(), 1);
     let ended = tokio::time::timeout(WAIT, &mut capture.task)
         .await
         .expect("capture ends after the drop")
         .expect("join");
     assert!(ended.is_ok(), "capture ended with {ended:?}");
-    assert!(!capture.include.in_effect_allows(&format!("{DB}.late")));
+    assert!(!capture.include.in_effect_allows(&format!("{DB}.items")));
+
+    // 7. The restart after that drop, without the dropped collection: the position is the
+    //    drop event itself, which the new filter leaves out.
+    items.insert_one(doc! { "_id": 40 }).await.expect("insert");
+    let mut capture = start(uri, &["items"], Some(checkpoint_after(&dropped)));
+    capture.follows("items").await;
+    let (rows, _) = capture.next_rows().await;
+    assert_eq!(rows, vec![("items".to_string(), 40)]);
+    capture.stop().await;
 
     db.drop().await.expect("drop database");
 }

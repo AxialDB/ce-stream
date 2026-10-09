@@ -66,7 +66,16 @@ fn in_this_database(database: &str, filter: &IncludeFilter) -> IncludeFilter {
 /// Without it the server prepares and sends every write of the database. With
 /// `fullDocument: required` that also fails the stream on an update in any collection that
 /// has no post-images, listed or not.
-fn server_filter(database: &str, filter: &IncludeFilter) -> Option<Document> {
+///
+/// `resume_after` is the token the stream is opened after. The server has to find that
+/// event in the stream, and it looks after the filter has run: a token of a collection that
+/// has left the list (it was dropped, or taken off) would be "not found". Its one event is
+/// let through by its id; it is the place to start and is never delivered.
+fn server_filter(
+    database: &str,
+    filter: &IncludeFilter,
+    resume_after: Option<&ResumeToken>,
+) -> Option<Document> {
     let IncludeFilter::Only(subjects) = in_this_database(database, filter) else {
         return None;
     };
@@ -76,14 +85,14 @@ fn server_filter(database: &str, filter: &IncludeFilter) -> Option<Document> {
         .filter_map(|subject| subject.strip_prefix(&prefix))
         .collect();
     collections.sort_unstable();
-    Some(doc! {
-        "$match": {
-            "$or": [
-                { "ns.coll": { "$in": collections } },
-                { "operationType": { "$in": ["dropDatabase", "invalidate"] } },
-            ]
-        }
-    })
+    let mut any = vec![
+        doc! { "ns.coll": { "$in": collections } },
+        doc! { "operationType": { "$in": ["dropDatabase", "invalidate"] } },
+    ];
+    if let Some(token) = resume_after.and_then(|token| mongodb::bson::to_bson(token).ok()) {
+        any.push(doc! { "_id": token });
+    }
+    Some(doc! { "$match": { "$or": any } })
 }
 
 /// Does a stream opened with `open` deliver everything `wanted` asks of this database?
@@ -236,7 +245,11 @@ impl MongoChangeStreamSource {
                 FullDocumentMode::UpdateLookup => FullDocumentType::UpdateLookup,
             },
         );
-        if let Some(stage) = server_filter(&self.options.database, filter) {
+        let resume_after = match start {
+            Start::After(token) => Some(token),
+            _ => None,
+        };
+        if let Some(stage) = server_filter(&self.options.database, filter, resume_after) {
             watch = watch.pipeline([stage]);
         }
         watch = match start {
@@ -412,8 +425,12 @@ mod tests {
 
     #[test]
     fn a_finite_list_is_a_match_on_its_collections_and_the_ending_events() {
-        let stage =
-            server_filter("app", &only(&["app.orders", "app.items", "other.orders"])).unwrap();
+        let stage = server_filter(
+            "app",
+            &only(&["app.orders", "app.items", "other.orders"]),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             stage,
             doc! { "$match": { "$or": [
@@ -422,7 +439,7 @@ mod tests {
             ] } }
         );
         // An empty list still lets the two ending events through.
-        let nothing = server_filter("app", &only(&[])).unwrap();
+        let nothing = server_filter("app", &only(&[]), None).unwrap();
         assert_eq!(
             nothing
                 .get_document("$match")
@@ -435,8 +452,23 @@ mod tests {
     }
 
     #[test]
+    fn the_event_a_stream_resumes_after_passes_the_filter_by_its_id() {
+        let token: ResumeToken =
+            serde_json::from_value(serde_json::json!({ "_data": "826AC93C3600000001" })).unwrap();
+        let stage = server_filter("app", &only(&["app.orders"]), Some(&token)).unwrap();
+        assert_eq!(
+            stage,
+            doc! { "$match": { "$or": [
+                { "ns.coll": { "$in": ["orders"] } },
+                { "operationType": { "$in": ["dropDatabase", "invalidate"] } },
+                { "_id": { "_data": "826AC93C3600000001" } },
+            ] } }
+        );
+    }
+
+    #[test]
     fn every_table_is_an_unfiltered_stream() {
-        assert!(server_filter("app", &IncludeFilter::All).is_none());
+        assert!(server_filter("app", &IncludeFilter::All, None).is_none());
     }
 
     #[test]

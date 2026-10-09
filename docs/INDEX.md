@@ -11,6 +11,7 @@
 | [`releases/v0.3.0.md`](releases/v0.3.0.md) | Everyone | v0.3.0 release notes (live include list) |
 | [`releases/v0.2.0.md`](releases/v0.2.0.md) | Everyone | v0.2.0 release notes (Gate 0) |
 | [`releasing.md`](releasing.md) | Maintainers | Issue → branch → PR → tag workflow; GitHub Release |
+| [`issues/11.md`](issues/11.md) | Maintainers | Mongo resume after an event the filter leaves out (#11, with #9 in v0.4.2) |
 | [`issues/9.md`](issues/9.md) | Maintainers | Mongo server-side include filter (#9, pending tag v0.4.2) |
 | [`issues/5.md`](issues/5.md) | Maintainers | MongoDB change stream source (#5, pending tag v0.4.0) |
 | [`issues/3.md`](issues/3.md) | Maintainers | Live include list (closes #3) |
