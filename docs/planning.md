@@ -135,15 +135,17 @@ Same `ChangeSource` / CloudEvent envelope:
 | Adapter | Mechanism | Status |
 |---------|-----------|--------|
 | `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **Shipped** in v0.4.0 ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
-| `ce-stream-postgres` | Logical decoding / replication protocol (sketch) | Deferred |
-| `ce-stream-sqlite` | update hooks / session (different shape, sketch) | Deferred |
-| MSSQL | Prefer consuming **CES** if available; not a binlog clone (sketch) | Deferred |
+| `ce-stream-postgres` | `pgoutput` logical decoding ([`postgres-design.md`](postgres-design.md)) | Design written; implementation deferred |
+| `ce-stream-sqlite` | In-process preupdate hook ([`sqlite-design.md`](sqlite-design.md)) | Design written; implementation deferred |
+| MSSQL | Transaction log tail, CDC not used ([`mssql-design.md`](mssql-design.md)) | Design written; spike in progress |
 
 **Exit (MongoDB):** `ce-stream-mongo` behind the same CLI `source.adapter = "mongo"`, released as v0.4.0. MySQL output unchanged.
 
 **Decision (2026-08-02):** Park Phase 6. v1 stays **MySQL 9.x only**. Traits may remain adapter-shaped so a future second engine can plug in without redesign, but no Postgres/SQLite/MSSQL work until explicitly pulled back.
 
 **Decision (2026-10-01):** Pull MongoDB back from Phase 6 ([#5](https://github.com/AxialDB/ce-stream/issues/5)). AxialDB needs MongoDB CDC without Kafka or Debezium, and change streams fit the existing `ChangeSource` and commit-boundary model. Scope: MongoDB 8.0+ replica sets, no sharded clusters. Postgres, SQLite, and MSSQL stay deferred.
+
+**Decision (2026-10-07):** Capture designs for the three deferred engines, no crates. PostgreSQL reads `pgoutput`. SQLite v1 is an in-process preupdate hook, not a file tail. SQL Server tails the transaction log in the ce-stream process. The preferred log is an availability-group secondary's, not the primary's, the same rule as the MySQL replica. Change data capture is not used, including as a logging switch. Express is not excluded. Change Event Streaming stays out. Fivetran's CLR log reader stays out. Linux spikes run on `buildcomp`.
 
 ---
 
@@ -168,4 +170,4 @@ Phase 0 → 1 (spike) → 2 (MVP) → 3 (HTTP E2E) → 4 (harden)
   → Phase 6: MongoDB (#5, v0.4.0); other DBs only if un-deferred
 ```
 
-**Now:** tag v0.4.0 after merge, then publish to crates.io in the order in [`releasing.md`](releasing.md#cratesio). Postgres, SQLite, and MSSQL stay deferred.
+**Now:** tag v0.4.0 after merge, then publish to crates.io in the order in [`releasing.md`](releasing.md#cratesio). Postgres, SQLite, and MSSQL have designs and stay unimplemented.

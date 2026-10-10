@@ -8,6 +8,9 @@ ce-stream-crash-test.toml
 *.swp
 scripts/perf/out/
 scripts/crash-harness/mysql/out/
+scripts/spike-mssql/out/
+scripts/spike-mssql/local/
+__pycache__/
 releases/staging/
 releases/staging/
 releases/dist/
