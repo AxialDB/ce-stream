@@ -25,15 +25,15 @@ Install the CLI from crates.io:
 cargo install ce-stream-cli
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/AxialDB/ce-stream/releases) (`v0.4.0` - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no database).
+Pre-built binaries: [GitHub Releases](https://github.com/AxialDB/ce-stream/releases) (latest: [`v0.4.3`](https://github.com/AxialDB/ce-stream/releases/tag/v0.4.3) - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no database).
 
-### v0.4.0 highlights
+### v0.4.3 highlights
 
-- **MongoDB change streams** — replica set, 8.0+, commit-boundary CloudEvents ([#5](https://github.com/AxialDB/ce-stream/issues/5)).
-- **MySQL output unchanged** — JSON and Avro v1 stay byte-identical to v0.3.0.
-- **Avro v2** — commits that carry a position or control events.
+- **MySQL: a DDL statement on its own is delivered** — `CREATE TABLE`, `ALTER TABLE`, `TRUNCATE TABLE`, `DROP TABLE` and the like arrive as DDL, and their GTIDs enter the executed set ([#13](https://github.com/AxialDB/ce-stream/issues/13)).
+- **MySQL: transactions that end with `COMMIT`** — changes to a table without transactions (MyISAM) are delivered.
+- **`gtid_set_after` names every commit before it** — also while commits wait in the queue.
 
-See [`docs/releases/v0.4.0.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.4.0.md) and [`CHANGELOG.md`](https://github.com/AxialDB/ce-stream/blob/main/CHANGELOG.md).
+See [`docs/releases/v0.4.3.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.4.3.md) and [`CHANGELOG.md`](https://github.com/AxialDB/ce-stream/blob/main/CHANGELOG.md).
 
 Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (required; validated at connect).
 
