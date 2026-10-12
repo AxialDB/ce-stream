@@ -154,7 +154,8 @@ fn transaction_payload_includes_ddl_query() {
                         exec_time: 0,
                         error_code: 0,
                         schema: "demo".into(),
-                        query: "ALTER TABLE orders ADD COLUMN x INT".into(),
+                        // As the server logs `CREATE TABLE ... SELECT`: rows and a commit follow.
+            query: "CREATE TABLE `demo`.`orders` (\n  `id` int DEFAULT NULL\n) START TRANSACTION".into(),
                     }),
                 ),
                 (header.clone(), EventData::TableMap(sample_table_map())),

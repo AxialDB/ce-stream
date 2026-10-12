@@ -75,7 +75,9 @@ fn ddl_buffered_then_commit_includes_ddl_and_rows() {
             exec_time: 0,
             error_code: 0,
             schema: "demo".into(),
-            query: "ALTER TABLE orders ADD COLUMN x INT".into(),
+            // As the server logs `CREATE TABLE ... SELECT`: rows and a commit follow.
+            query: "CREATE TABLE `demo`.`orders` (\n  `id` int DEFAULT NULL\n) START TRANSACTION"
+                .into(),
         }),
     )
     .unwrap();
@@ -122,7 +124,9 @@ fn row_mode_one_ddl_ce_then_three_row_ces() {
             exec_time: 0,
             error_code: 0,
             schema: "demo".into(),
-            query: "CREATE TABLE orders (id INT)".into(),
+            // As the server logs `CREATE TABLE ... SELECT`: rows and a commit follow.
+            query: "CREATE TABLE `demo`.`orders` (\n  `id` int DEFAULT NULL\n) START TRANSACTION"
+                .into(),
         }),
     )
     .unwrap();

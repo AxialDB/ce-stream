@@ -41,6 +41,16 @@ pub(crate) fn dispatch_binlog_event(
 ) -> std::result::Result<(), String> {
     match data {
         EventData::Gtid(g) => {
+            // A transaction that is still pending here had no end the
+            // adapter knows: an XA transaction, or one that was rolled back.
+            // It is not delivered, as before.
+            if let Some(unfinished) = ctx.txn.pending_gtid() {
+                warn!(
+                    gtid = unfinished,
+                    rows = ctx.txn.buffered_rows(),
+                    "transaction without a commit event; not delivered"
+                );
+            }
             ctx.txn.set_include(ctx.include.snapshot_filter());
             ctx.txn.on_gtid(g.gtid);
         }
@@ -90,38 +100,71 @@ fn apply_table_map(tables: &mut HashMap<u64, TableMap>, tm: TableMapEvent) {
     );
 }
 
+/// A `Query` event either belongs to a transaction in brackets or is a
+/// transaction by itself; see [`ddl::QueryKind`]. A statement that is one by
+/// itself is delivered here: no `Xid` event follows it.
 fn buffer_query(
     ctx: &mut BinlogDispatchCtx<'_>,
     q: mysql_binlog_connector_rust::event::query_event::QueryEvent,
 ) -> std::result::Result<(), String> {
-    if ddl::is_ignored_transaction_query(&q.query) {
-        return Ok(());
+    match ddl::query_kind(&q.query) {
+        ddl::QueryKind::Begin => {
+            ctx.txn.mark_open();
+            Ok(())
+        }
+        // The end of a transaction on an engine without transactions
+        // (MyISAM): `BEGIN`, rows, `COMMIT`, and no `Xid`.
+        ddl::QueryKind::Commit => {
+            if ctx.txn.pending_gtid().is_some() {
+                flush_commit(ctx)
+            } else {
+                Ok(())
+            }
+        }
+        ddl::QueryKind::Rollback => Ok(()),
+        ddl::QueryKind::Ddl => {
+            ctx.txn
+                .pending_gtid()
+                .ok_or_else(|| "DDL query without pending GTID".to_string())?;
+            let opens = ddl::ddl_opens_transaction(&q.query);
+            ctx.txn.push_ddl(ce_stream_core::transaction::DdlStatement {
+                schema: q.schema,
+                query: q.query,
+            });
+            if opens {
+                ctx.txn.mark_open();
+            }
+            if ctx.txn.is_open() {
+                // `CREATE TABLE ... SELECT`: the rows and the commit follow.
+                Ok(())
+            } else {
+                flush_commit(ctx)
+            }
+        }
+        ddl::QueryKind::Other => {
+            debug!(schema = %q.schema, query = %q.query, "ignored non-DDL query");
+            if ctx.txn.pending_gtid().is_some() && !ctx.txn.is_open() {
+                // `GRANT`, `ANALYZE TABLE`, `XA COMMIT`: nothing to deliver
+                // but the transaction itself, so that its GTID is executed.
+                flush_commit(ctx)
+            } else {
+                Ok(())
+            }
+        }
     }
-    if !ddl::is_ddl_query(&q.query) {
-        debug!(schema = %q.schema, query = %q.query, "ignored non-DDL query");
-        return Ok(());
-    }
-
-    ctx.txn
-        .pending_gtid()
-        .ok_or_else(|| "DDL query without pending GTID".to_string())?;
-
-    ctx.txn.push_ddl(ce_stream_core::transaction::DdlStatement {
-        schema: q.schema,
-        query: q.query,
-    });
-    Ok(())
 }
 
+/// Deliver the pending transaction: at its `Xid`, at its `COMMIT`, or at a
+/// statement that is a transaction by itself.
 fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), String> {
     let Some(pending) = ctx.txn.pending_gtid().map(str::to_string) else {
         return Err("XID without preceding GTID event".into());
     };
 
+    let executed = ctx.executed;
     let gtid_set_after = ctx
-        .executed
-        .blocking_lock()
-        .gtid_set_after(&pending)
+        .txn
+        .pass_on(&pending, || start_set(executed))
         .map_err(|e| e.to_string())?;
 
     let Some(commit) = ctx.txn.take_commit(gtid_set_after) else {
@@ -131,6 +174,14 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
     ctx.tx
         .blocking_send(Ok(commit))
         .map_err(|_| "event channel closed".to_string())
+}
+
+/// The set the reader starts from: what the consumer has executed when the
+/// reader builds its first set. From there the reader counts on its own. The
+/// consumer's set moves only when a commit is taken from the queue, so a set
+/// built from it would leave out the commits that still wait there.
+fn start_set(executed: &Arc<Mutex<ExecutedSet>>) -> ce_stream_core::error::Result<ExecutedSet> {
+    ExecutedSet::from_set_string(&executed.blocking_lock().to_set_string())
 }
 
 fn column_names_from_table_map(tm: &TableMapEvent) -> Vec<String> {
@@ -184,10 +235,10 @@ where
         .ok_or_else(|| "row event without pending GTID".to_string())?
         .to_string();
 
+    let executed = ctx.executed;
     let gtid_set = ctx
-        .executed
-        .blocking_lock()
-        .gtid_set_after(&pending_gtid)
+        .txn
+        .set_after(&pending_gtid, || start_set(executed))
         .map_err(|e| e.to_string())?;
 
     let table = tm.table.clone();
