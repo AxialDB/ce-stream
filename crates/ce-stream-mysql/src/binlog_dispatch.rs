@@ -41,6 +41,16 @@ pub(crate) fn dispatch_binlog_event(
 ) -> std::result::Result<(), String> {
     match data {
         EventData::Gtid(g) => {
+            // A transaction that is still pending here had no end the
+            // adapter knows: an XA transaction, or one that was rolled back.
+            // It is not delivered, as before.
+            if let Some(unfinished) = ctx.txn.pending_gtid() {
+                warn!(
+                    gtid = unfinished,
+                    rows = ctx.txn.buffered_rows(),
+                    "transaction without a commit event; not delivered"
+                );
+            }
             ctx.txn.set_include(ctx.include.snapshot_filter());
             ctx.txn.on_gtid(g.gtid);
         }
@@ -90,29 +100,62 @@ fn apply_table_map(tables: &mut HashMap<u64, TableMap>, tm: TableMapEvent) {
     );
 }
 
+/// A `Query` event either belongs to a transaction in brackets or is a
+/// transaction by itself; see [`ddl::QueryKind`]. A statement that is one by
+/// itself is delivered here: no `Xid` event follows it.
 fn buffer_query(
     ctx: &mut BinlogDispatchCtx<'_>,
     q: mysql_binlog_connector_rust::event::query_event::QueryEvent,
 ) -> std::result::Result<(), String> {
-    if ddl::is_ignored_transaction_query(&q.query) {
-        return Ok(());
+    match ddl::query_kind(&q.query) {
+        ddl::QueryKind::Begin => {
+            ctx.txn.mark_open();
+            Ok(())
+        }
+        // The end of a transaction on an engine without transactions
+        // (MyISAM): `BEGIN`, rows, `COMMIT`, and no `Xid`.
+        ddl::QueryKind::Commit => {
+            if ctx.txn.pending_gtid().is_some() {
+                flush_commit(ctx)
+            } else {
+                Ok(())
+            }
+        }
+        ddl::QueryKind::Rollback => Ok(()),
+        ddl::QueryKind::Ddl => {
+            ctx.txn
+                .pending_gtid()
+                .ok_or_else(|| "DDL query without pending GTID".to_string())?;
+            let opens = ddl::ddl_opens_transaction(&q.query);
+            ctx.txn.push_ddl(ce_stream_core::transaction::DdlStatement {
+                schema: q.schema,
+                query: q.query,
+            });
+            if opens {
+                ctx.txn.mark_open();
+            }
+            if ctx.txn.is_open() {
+                // `CREATE TABLE ... SELECT`: the rows and the commit follow.
+                Ok(())
+            } else {
+                flush_commit(ctx)
+            }
+        }
+        ddl::QueryKind::Other => {
+            debug!(schema = %q.schema, query = %q.query, "ignored non-DDL query");
+            if ctx.txn.pending_gtid().is_some() && !ctx.txn.is_open() {
+                // `GRANT`, `ANALYZE TABLE`, `XA COMMIT`: nothing to deliver
+                // but the transaction itself, so that its GTID is executed.
+                flush_commit(ctx)
+            } else {
+                Ok(())
+            }
+        }
     }
-    if !ddl::is_ddl_query(&q.query) {
-        debug!(schema = %q.schema, query = %q.query, "ignored non-DDL query");
-        return Ok(());
-    }
-
-    ctx.txn
-        .pending_gtid()
-        .ok_or_else(|| "DDL query without pending GTID".to_string())?;
-
-    ctx.txn.push_ddl(ce_stream_core::transaction::DdlStatement {
-        schema: q.schema,
-        query: q.query,
-    });
-    Ok(())
 }
 
+/// Deliver the pending transaction: at its `Xid`, at its `COMMIT`, or at a
+/// statement that is a transaction by itself.
 fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), String> {
     let Some(pending) = ctx.txn.pending_gtid().map(str::to_string) else {
         return Err("XID without preceding GTID event".into());

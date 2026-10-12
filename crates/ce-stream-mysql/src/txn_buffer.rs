@@ -4,10 +4,13 @@ use ce_stream_core::include::IncludeFilter;
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
 use ce_stream_core::CloudEvent;
 
-/// Buffers DDL + row CloudEvents until XID.
+/// Buffers DDL + row CloudEvents until the transaction ends.
 #[derive(Debug, Default)]
 pub struct TxnBuffer {
     pending_gtid: Option<String>,
+    /// A `BEGIN` was read: the transaction ends at its `Xid` or `COMMIT`.
+    /// Without one, a statement is a transaction by itself.
+    open: bool,
     ddl: Vec<DdlStatement>,
     events: Vec<CloudEvent>,
     /// Include snapshot taken at GTID for this envelope.
@@ -30,8 +33,23 @@ impl TxnBuffer {
 
     pub fn on_gtid(&mut self, gtid: String) {
         self.pending_gtid = Some(gtid);
+        self.open = false;
         self.ddl.clear();
         self.events.clear();
+    }
+
+    /// The transaction is in brackets: its end is still to come.
+    pub(crate) fn mark_open(&mut self) {
+        self.open = true;
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Row events buffered for the transaction that is pending.
+    pub(crate) fn buffered_rows(&self) -> usize {
+        self.events.len()
     }
 
     pub fn push_ddl(&mut self, stmt: DdlStatement) {
@@ -42,9 +60,11 @@ impl TxnBuffer {
         self.events.push(event);
     }
 
-    /// Build commit payload at XID; clears in-flight buffers but does not clear pending until taken.
+    /// Build commit payload at the end of the transaction; clears in-flight buffers but does not
+    /// clear pending until taken.
     pub fn take_commit(&mut self, gtid_set_after: String) -> Option<CommittedTransaction> {
         let gtid = self.pending_gtid.take()?;
+        self.open = false;
         Some(CommittedTransaction {
             gtid,
             gtid_set_after,
