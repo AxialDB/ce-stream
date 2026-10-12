@@ -287,4 +287,63 @@ fn a_rolled_back_transaction_is_not_delivered() {
     ]);
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].1.gtid, "uuid:2");
+    assert_eq!(delivered[0].1.gtid_set_after, "uuid:2-2");
+}
+
+/// The consumer is behind and commits wait in the queue. The set after each
+/// still names every commit before it: the reader counts what it has passed
+/// on, not what the consumer has taken.
+#[test]
+fn the_set_after_a_commit_names_the_commits_that_wait_in_the_queue() {
+    let include = IncludeList::from_subjects(["demo.orders"]);
+    let (tx, mut rx) = mpsc::channel(64);
+    // What a checkpoint holds at the start. Nothing is taken from the queue
+    // while the events are read, so this set does not move.
+    let executed = Arc::new(Mutex::new(
+        ExecutedSet::from_set_string("uuid:1-5").expect("set"),
+    ));
+    let mut tables = HashMap::new();
+    let mut txn = TxnBuffer::default();
+    let events = vec![
+        gtid(6),
+        query("CREATE DATABASE demo2"),
+        gtid(7),
+        query("TRUNCATE TABLE demo.orders"),
+        gtid(8),
+        query("BEGIN"),
+        table_map(),
+        write_rows(1),
+        xid(),
+        // Rolled back: not passed on, so it is in no set.
+        gtid(9),
+        query("BEGIN"),
+        table_map(),
+        write_rows(1),
+        query("ROLLBACK"),
+        gtid(10),
+        query("ANALYZE TABLE demo.orders"),
+    ];
+    for event in events {
+        let mut ctx = BinlogDispatchCtx {
+            txn: &mut txn,
+            executed: &executed,
+            tables: &mut tables,
+            source_id: "mysql://test",
+            include: &include,
+            payload_mode: PayloadMode::Full,
+            tx: &tx,
+        };
+        dispatch(&mut ctx, event).expect("dispatch");
+    }
+    let mut commits = Vec::new();
+    while let Ok(commit) = rx.try_recv() {
+        commits.push(commit.expect("commit"));
+    }
+    let sets: Vec<&str> = commits.iter().map(|c| c.gtid_set_after.as_str()).collect();
+    assert_eq!(sets, ["uuid:1-6", "uuid:1-7", "uuid:1-8", "uuid:1-8:10-10"]);
+    // A row event carries the same set as its commit.
+    assert_eq!(
+        commits[2].events[0].extensions["gtidset"],
+        serde_json::json!("uuid:1-8")
+    );
 }

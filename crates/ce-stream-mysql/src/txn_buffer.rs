@@ -1,8 +1,11 @@
 //! In-flight MySQL transaction buffer (commit-boundary emit).
 
+use ce_stream_core::error::Result;
 use ce_stream_core::include::IncludeFilter;
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
 use ce_stream_core::CloudEvent;
+
+use crate::gtid::ExecutedSet;
 
 /// Buffers DDL + row CloudEvents until the transaction ends.
 #[derive(Debug, Default)]
@@ -15,6 +18,10 @@ pub struct TxnBuffer {
     events: Vec<CloudEvent>,
     /// Include snapshot taken at GTID for this envelope.
     include_filter: IncludeFilter,
+    /// The set the reader started from and every transaction it has passed
+    /// on since. The consumer's executed set is behind it by the commits
+    /// that wait in the queue.
+    passed_on: Option<ExecutedSet>,
 }
 
 impl TxnBuffer {
@@ -50,6 +57,39 @@ impl TxnBuffer {
     /// Row events buffered for the transaction that is pending.
     pub(crate) fn buffered_rows(&self) -> usize {
         self.events.len()
+    }
+
+    /// The executed set once the transaction `pending` is committed: the set
+    /// the reader started from, every transaction it has passed on, and
+    /// `pending`. `start` gives the set the reader started from; it is asked
+    /// once.
+    pub(crate) fn set_after(
+        &mut self,
+        pending: &str,
+        start: impl FnOnce() -> Result<ExecutedSet>,
+    ) -> Result<String> {
+        self.reader_set(start)?.gtid_set_after(pending)
+    }
+
+    /// As [`Self::set_after`], and `pending` counts as passed on from here.
+    pub(crate) fn pass_on(
+        &mut self,
+        pending: &str,
+        start: impl FnOnce() -> Result<ExecutedSet>,
+    ) -> Result<String> {
+        let set = self.reader_set(start)?;
+        set.add_committed(pending)?;
+        Ok(set.to_set_string())
+    }
+
+    fn reader_set(
+        &mut self,
+        start: impl FnOnce() -> Result<ExecutedSet>,
+    ) -> Result<&mut ExecutedSet> {
+        Ok(match &mut self.passed_on {
+            Some(set) => set,
+            none => none.insert(start()?),
+        })
     }
 
     pub fn push_ddl(&mut self, stmt: DdlStatement) {

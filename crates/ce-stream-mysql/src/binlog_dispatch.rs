@@ -161,10 +161,10 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
         return Err("XID without preceding GTID event".into());
     };
 
+    let executed = ctx.executed;
     let gtid_set_after = ctx
-        .executed
-        .blocking_lock()
-        .gtid_set_after(&pending)
+        .txn
+        .pass_on(&pending, || start_set(executed))
         .map_err(|e| e.to_string())?;
 
     let Some(commit) = ctx.txn.take_commit(gtid_set_after) else {
@@ -174,6 +174,14 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
     ctx.tx
         .blocking_send(Ok(commit))
         .map_err(|_| "event channel closed".to_string())
+}
+
+/// The set the reader starts from: what the consumer has executed when the
+/// reader builds its first set. From there the reader counts on its own. The
+/// consumer's set moves only when a commit is taken from the queue, so a set
+/// built from it would leave out the commits that still wait there.
+fn start_set(executed: &Arc<Mutex<ExecutedSet>>) -> ce_stream_core::error::Result<ExecutedSet> {
+    ExecutedSet::from_set_string(&executed.blocking_lock().to_set_string())
 }
 
 fn column_names_from_table_map(tm: &TableMapEvent) -> Vec<String> {
@@ -227,10 +235,10 @@ where
         .ok_or_else(|| "row event without pending GTID".to_string())?
         .to_string();
 
+    let executed = ctx.executed;
     let gtid_set = ctx
-        .executed
-        .blocking_lock()
-        .gtid_set_after(&pending_gtid)
+        .txn
+        .set_after(&pending_gtid, || start_set(executed))
         .map_err(|e| e.to_string())?;
 
     let table = tm.table.clone();
