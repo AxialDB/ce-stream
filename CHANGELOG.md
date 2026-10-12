@@ -7,6 +7,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-11
+
+MySQL: transactions that do not end with an `Xid` event ([issue #13](https://github.com/AxialDB/ce-stream/issues/13)).
+Release notes: [`docs/releases/v0.4.3.md`](docs/releases/v0.4.3.md).
+
+### Fixed
+
+- MySQL: a DDL statement on its own (`CREATE TABLE`, `ALTER TABLE`, `TRUNCATE TABLE`, `DROP TABLE`, `CREATE DATABASE`, ...) was never delivered, and its GTID never entered the executed set. The server writes such a statement as one `Query` event with no `Xid` after it, and a transaction was delivered only at an `Xid`. It is now delivered when its `Query` event is read.
+- MySQL: a transaction on a table without transactions (MyISAM) was never delivered. It ends with a `COMMIT` query where InnoDB has an `Xid`.
+- MySQL: a statement that is neither DDL nor in a transaction (`GRANT`, `ANALYZE TABLE`) left a hole in the executed set. It is delivered as a commit without events, like a commit whose rows the include list leaves out.
+- MySQL: a DDL statement with a comment in front (`/* ... */ ALTER TABLE ...`, as some clients send it) was not recognized as DDL.
+- MySQL: `gtid_set_after` of a commit (and `gtidset` of its row events) left out the commits before it that the consumer had not taken from the queue yet, as happens while the source catches up after a start. The reader built the set from what the consumer had executed; it now counts what it has passed on. The checkpoint was not affected.
+
+### Changed
+
+- MySQL: `row` delivery now emits the `io.ce-stream.mysql.ddl` CloudEvent for DDL statements on their own, and `transaction` delivery an envelope with `ddl` set and no events. Before, DDL arrived only for `CREATE TABLE ... SELECT`, whose rows end with an `Xid`.
+- MySQL: more commits without events arrive: one for each statement that is a transaction by itself and is not DDL.
+
 ## [0.4.2] - 2026-10-09
 
 Mongo: server-side include filter ([issue #9](https://github.com/AxialDB/ce-stream/issues/9)).

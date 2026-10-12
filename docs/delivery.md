@@ -6,9 +6,21 @@ ce-stream is **at-least-once**, not exactly-once.
 
 ## Commit-boundary emit (v0.2.0)
 
-Regardless of `delivery_unit`, the MySQL adapter **buffers** row and DDL events until **XID**. Consumers see **nothing mid-transaction**.
+Regardless of `delivery_unit`, the MySQL adapter **buffers** row and DDL events until the transaction **ends**. Consumers see **nothing mid-transaction**.
 
-After XID, delivery shape depends on `source.delivery_unit`:
+Where a transaction ends (v0.4.3, [#13](https://github.com/AxialDB/ce-stream/issues/13)). The server writes a transaction in one of two shapes:
+
+| Shape in the binlog | Ends at | Delivered as |
+|---------------------|---------|--------------|
+| `BEGIN`, rows, `Xid` (InnoDB) | the `Xid` event | the rows |
+| `BEGIN`, rows, `COMMIT` query (a table without transactions, such as MyISAM) | the `COMMIT` | the rows |
+| `BEGIN`, `CREATE TABLE ... START TRANSACTION`, rows, `Xid` (`CREATE TABLE ... SELECT`) | the `Xid` event | the DDL statement and the rows |
+| One `Query` event: a DDL statement (`ALTER TABLE`, `TRUNCATE TABLE`, `DROP TABLE`, `CREATE DATABASE`, ...) | that event | the DDL statement, no rows |
+| One `Query` event: any other statement (`GRANT`, `ANALYZE TABLE`) | that event | a commit without events; its GTID enters the executed set |
+
+Not delivered: an XA transaction (`XA START` ... `XA PREPARE`; its `XA COMMIT` arrives as a commit without events), and a transaction the binlog ends with `ROLLBACK`. The stream goes on past both.
+
+After the end of the transaction ("XID" below), delivery shape depends on `source.delivery_unit`:
 
 | `delivery_unit` | After XID | Checkpoint |
 |-----------------|-----------|------------|

@@ -67,7 +67,7 @@ source
     .await?;
 ```
 
-Row mode and transaction mode share the same commit-boundary buffering — nothing is emitted before XID.
+Row mode and transaction mode share the same commit-boundary buffering — nothing is emitted before the transaction ends (its `Xid`, its `COMMIT`, or the one `Query` event of a statement that is a transaction by itself; see [`delivery.md`](delivery.md)).
 
 ## Live include list
 
