@@ -7,7 +7,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.4.3] - 2026-10-11
+## [0.4.3] - 2026-10-12
 
 MySQL: transactions that do not end with an `Xid` event ([issue #13](https://github.com/AxialDB/ce-stream/issues/13)).
 Release notes: [`docs/releases/v0.4.3.md`](docs/releases/v0.4.3.md).

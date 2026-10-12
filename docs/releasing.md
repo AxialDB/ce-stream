@@ -26,7 +26,7 @@ One issue, one branch, one PR, one release (#1 shipped as v0.2.0, #3 as v0.3.0).
 3. **Branch** from `main`: `issue-N/<slug>` (example: `issue-1/gate0-transaction-boundary`).
 4. **Scope change.** If the issue widens what ce-stream supports (a new source engine, a new sink class) or pulls back a deferred phase, the same PR records the decision in [`planning.md`](planning.md) and updates the scope lines in `README.md`, `CONTRIBUTING.md`, [`INDEX.md`](INDEX.md), and `.github/DISCUSSION_TEMPLATE/ideas.yml`.
 5. **Large features: open the PR as a draft early.** Keep commits in reviewable order: core or refactor changes first with the existing tests green, then the new code, then tests and docs. Mark ready for review when the checklist is done.
-6. **PR** from the template. Include `Fixes #N`, the checklist, a test plan, and reviewer notes that name any breaking change. The same PR bumps the workspace version and adds the `CHANGELOG.md` entry and `docs/releases/vX.Y.Z.md`.
+6. **PR** from the template. Include `Fixes #N`, the checklist, a test plan, and reviewer notes that name any breaking change. The same PR bumps the workspace version and adds the `CHANGELOG.md` entry and `docs/releases/vX.Y.Z.md`. It also moves the release named in [`README.md`](../README.md) to the new one: the tag after "Pre-built binaries", the highlights heading, and the link to the release notes. `README.md` is the page of every crate on crates.io, so what the tag holds is what crates.io shows.
 7. Wait for **CI** and **Release** (package) jobs on the PR. Linux and Windows builds must both succeed.
 8. The maintainer merges to `main` by hand.
 9. Annotated tag on `main`: `git tag -a v0.3.0 -m "v0.3.0: live include-list updates"`
@@ -57,7 +57,7 @@ bash scripts/release/package-linux.sh 0.2.0
 
 ## crates.io
 
-Publish only after the `v0.4.0` tag is on `main`. `cargo publish` rewrites workspace path dependencies to versions, so each crate below must already be on crates.io before the next one. `ce-stream-spike` and `ce-stream-perf-sink` stay `publish = false`.
+Publish only after the release tag is on `main`, and from that tag. Before the first `cargo publish`, read `README.md` at the tag once more: it must name this release and no earlier one. `cargo publish` rewrites workspace path dependencies to versions, so each crate below must already be on crates.io before the next one. `ce-stream-spike` and `ce-stream-perf-sink` stay `publish = false`.
 
 ```powershell
 cargo publish -p ce-stream-mysql-binlog
