@@ -82,6 +82,22 @@ impl ControlEvent {
     }
 }
 
+/// Where a delivery sits in a transaction that is delivered in parts.
+///
+/// A transaction larger than one part (see [`crate::SourceConfig::part_max_rows`]
+/// and [`crate::SourceConfig::part_max_bytes`]) is delivered as several
+/// [`CommittedTransaction`] values with the same GTID, numbered from 1, in
+/// order and with nothing between them. Only the last one ends the
+/// transaction: it alone carries the position after it and moves the
+/// checkpoint. A part that is not the last is not a commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionPart {
+    /// 1 for the first part.
+    pub number: u32,
+    /// The last part of the transaction.
+    pub last: bool,
+}
+
 /// One committed source transaction — primary delivery unit when `delivery_unit = transaction`.
 ///
 /// MySQL fills `gtid` / `gtid_set_after` and leaves `position` and `control`
@@ -105,9 +121,20 @@ pub struct CommittedTransaction {
     pub control: Vec<ControlEvent>,
     /// Row change events in source order.
     pub events: Vec<CloudEvent>,
+    /// Set when the transaction is delivered in parts; `None` for a
+    /// transaction delivered whole. See [`TransactionPart`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<TransactionPart>,
 }
 
 impl CommittedTransaction {
+    /// Does this delivery end its transaction: a whole transaction, or the
+    /// last part of one? Only such a delivery carries the position after the
+    /// transaction and may move a checkpoint.
+    pub fn ends_transaction(&self) -> bool {
+        self.part.map_or(true, |part| part.last)
+    }
+
     /// Adapter-neutral position. MySQL commits derive it from the GTID fields:
     /// `at = {"gtid": gtid}`, `after = {"gtid": gtid_set_after}`.
     pub fn source_position(&self) -> SourcePosition {
@@ -125,6 +152,7 @@ mod tests {
 
     fn mysql_txn() -> CommittedTransaction {
         CommittedTransaction {
+            part: None,
             gtid: "sid:5".into(),
             gtid_set_after: "sid:1-5".into(),
             ..Default::default()
@@ -161,6 +189,7 @@ mod tests {
     #[test]
     fn adapter_position_roundtrips() {
         let txn = CommittedTransaction {
+            part: None,
             position: Some(SourcePosition {
                 adapter: "mongo".into(),
                 at: serde_json::json!({ "cluster_time": [1, 2] }),

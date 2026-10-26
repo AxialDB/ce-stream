@@ -15,7 +15,9 @@ MySQL 9.x lab regression for [issue #1](https://github.com/AxialDB/ce-stream/iss
               assert checkpoint advances past G0
 ```
 
-Uses `ce-stream-perf-sink --stall-after 1` to simulate mid-fanout crash.
+Uses `ce-stream-perf-sink --stall-at N` to simulate a crash in the middle of a delivery: the sink answers the deliveries before the Nth and hangs on it, and the harness kills ce-stream once it hangs. Row mode hangs on row 2; transaction mode hangs on the one envelope, so nothing of the transaction is answered.
+
+With `--part-max-rows N` / `-PartMaxRows N` ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)) the transaction has `2N+1` rows unless `--txn-rows` says otherwise, and is delivered in parts of N rows. The sink answers the whole first part (N rows in row mode, one envelope in transaction mode) and hangs on the first delivery of the second part (`--stall-at N+1` or `--stall-at 2`), so the kill falls after a whole part was taken. The checkpoint must not have moved, and the restart delivers the whole transaction again from part 1.
 
 ## Scripts
 

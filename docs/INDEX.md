@@ -13,6 +13,7 @@
 | [`releases/v0.2.0.md`](releases/v0.2.0.md) | Everyone | v0.2.0 release notes (Gate 0) |
 | [`releasing.md`](releasing.md) | Maintainers | Issue → branch → PR → tag workflow; GitHub Release |
 | [`issues/13.md`](issues/13.md) | Maintainers | MySQL: a DDL statement on its own is never delivered (#13, v0.4.3) |
+| [`issues/16.md`](issues/16.md) | Maintainers | Deliver a long transaction in parts instead of holding it whole (#16, planned v0.5.0) |
 | [`issues/11.md`](issues/11.md) | Maintainers | Mongo resume after an event the filter leaves out (#11, with #9 in v0.4.2) |
 | [`issues/9.md`](issues/9.md) | Maintainers | Mongo server-side include filter (#9, pending tag v0.4.2) |
 | [`issues/5.md`](issues/5.md) | Maintainers | MongoDB change stream source (#5, pending tag v0.4.0) |

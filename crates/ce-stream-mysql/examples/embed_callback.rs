@@ -32,6 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tls: true,
         },
         config: SourceConfig {
+            part_max_rows: ce_stream_core::source::DEFAULT_PART_MAX_ROWS,
+            part_max_bytes: ce_stream_core::source::DEFAULT_PART_MAX_BYTES,
+            queue_max_bytes: ce_stream_core::source::DEFAULT_QUEUE_MAX_BYTES,
             source_id: "mysql://127.0.0.1:3306/embed-example".into(),
             include_tables: vec![TableRef::new(db, tbl)],
             payload_mode: Default::default(),

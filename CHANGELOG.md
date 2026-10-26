@@ -7,6 +7,30 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Long transactions in parts ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)). Planned as 0.5.0.
+Release notes: [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md).
+
+### Added
+
+- MySQL and MongoDB: a transaction larger than one part (`part_max_rows`, default 10,000 rows, or `part_max_bytes`, default 16 MB of row data) is delivered in parts as it is read. Both limits are settings in `SourceConfig` and under `[source]` in the CLI config.
+- MySQL: `queue_max_bytes` (default 32 MB): the queue to the consumer holds at most this many bytes of row data besides `queue_capacity` deliveries. A setting in `SourceConfig` and under `[source]` in the CLI config.
+- `CommittedTransaction::part` (`TransactionPart { number, last }`) and `CommittedTransaction::ends_transaction()`.
+- Avro `committed-transaction-v3` for a part.
+- `ce_stream_core::event::approx_json_bytes`.
+- `ce-stream-perf-sink --stall-at N`, and a `stalled` count in its stats.
+- Crash harness: `-PartMaxRows N` / `--part-max-rows N`.
+
+### Changed
+
+- A transaction larger than one part arrives as several deliveries. Only the last part carries the position after the transaction and moves the checkpoint.
+- MySQL: the executed set (`gtid_set_after`, the `gtidset` extension) is on the last part only.
+- MySQL: a `ROLLBACK` after a delivered part stops the stream with an error.
+
+### Fixed
+
+- MySQL: a delivery the consumer refused could hang the stream until the server dropped the connection.
+- Crash harness: transaction mode with a whole transaction could not hang the first delivery, so the check of the checkpoint after a kill failed.
+
 ## [0.4.3] - 2026-10-12
 
 MySQL: transactions that do not end with an `Xid` event ([issue #13](https://github.com/AxialDB/ce-stream/issues/13)).

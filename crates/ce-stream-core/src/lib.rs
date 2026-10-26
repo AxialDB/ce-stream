@@ -23,5 +23,5 @@ pub use sink::Sink;
 pub use sinks::{HttpSink, StdoutSink};
 pub use source::{ChangeSource, DeliveryUnit, SourceConfig};
 pub use transaction::{
-    CommittedTransaction, ControlEvent, ControlKind, DdlStatement, SourcePosition,
+    CommittedTransaction, ControlEvent, ControlKind, DdlStatement, SourcePosition, TransactionPart,
 };

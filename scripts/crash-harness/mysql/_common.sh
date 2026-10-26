@@ -35,11 +35,16 @@ get_capture_password() {
 write_crash_harness_toml() {
     local path=$1 sink_url=$2 checkpoint_path=$3
     local delivery_unit=${4:-row} server_id=${5:-19301} queue_capacity=${6:-64}
+    local part_max_rows=${7:-0}
     local mysql_port=${MYSQL_PORT:-3307}
     local mysql_host=${MYSQL_HOST:-127.0.0.1}
     local mysql_tls=${MYSQL_TLS:-false}
     local password
     password=$(get_capture_password)
+    local part_line=""
+    if [[ "$part_max_rows" -gt 0 ]]; then
+        part_line="part_max_rows = ${part_max_rows}"
+    fi
     cat >"$path" <<EOF
 [source]
 adapter = "mysql"
@@ -54,6 +59,7 @@ payload_mode = "full"
 delivery_unit = "${delivery_unit}"
 queue_capacity = ${queue_capacity}
 include_tables = ["ce_stream_spike.t1"]
+${part_line}
 
 [checkpoint]
 path = "${checkpoint_path}"
@@ -97,6 +103,23 @@ wait_sink_count() {
         sleep 0.2
     done
     echo "timeout waiting for sink count>=${expected} (last=${last})" >&2
+    return 1
+}
+
+# Wait until a POST hangs in the sink (--stall-at): the delivery the kill falls on.
+wait_sink_stalled() {
+    local base_url=$1 timeout_sec=${2:-120}
+    local deadline=$((SECONDS + timeout_sec)) last=0
+    while (( SECONDS < deadline )); do
+        last=$(get_sink_stats "$base_url" | sed -n 's/.*"stalled":\([0-9]*\).*/\1/p')
+        if [[ -z "$last" ]]; then last=0; fi
+        if (( last >= 1 )); then
+            get_sink_stats "$base_url"
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "timeout waiting for a stalled sink delivery" >&2
     return 1
 }
 

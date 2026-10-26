@@ -177,7 +177,14 @@ impl MongoChangeStreamSource {
         let _in_effect = InEffect(self.include.clone());
         // The last place read from the server: an event, or the end of an empty batch.
         let mut last_read: Option<ResumeToken> = None;
-        let mut grouper = TxnGrouper::new(seed);
+        let mut grouper = TxnGrouper::new(seed)
+            .with_part_limits(self.config.part_max_rows, self.config.part_max_bytes);
+        tracing::info!(
+            database = %self.options.database,
+            part_max_rows = self.config.part_max_rows,
+            part_max_bytes = self.config.part_max_bytes,
+            "starting MongoDB change stream source"
+        );
 
         loop {
             // TxnGrouper pins this filter when the group starts. Later events in the group ignore a newer list.
@@ -271,6 +278,7 @@ impl MongoChangeStreamSource {
         TxnFn: FnMut(CommittedTransaction) -> Result<()>,
     {
         let stop = emit.stop;
+        let commit = emit.txn.ends_transaction();
         let source_id = self.config.source_id.clone();
         match self.config.delivery_unit {
             DeliveryUnit::Row => {
@@ -283,7 +291,8 @@ impl MongoChangeStreamSource {
             }
             DeliveryUnit::Transaction => on_txn(emit.txn.clone())?,
         }
-        if let Some(position) = emit.txn.position {
+        // A part that is not the last is not a commit: a restart reads its transaction again.
+        if let Some(position) = emit.txn.position.filter(|_| commit) {
             let cp = Checkpoint {
                 adapter: crate::checkpoint::ADAPTER.into(),
                 payload: position.after,

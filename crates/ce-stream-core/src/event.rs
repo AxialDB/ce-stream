@@ -68,6 +68,21 @@ pub enum SinkFormat {
     Avro,
 }
 
+/// About how many bytes a row's data takes: the text of its strings and keys,
+/// and eight bytes for anything else. What bounds a part of a transaction
+/// (`part_max_bytes`); the same measure for every reader.
+pub fn approx_json_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(s) => s.len(),
+        serde_json::Value::Array(items) => items.iter().map(approx_json_bytes).sum(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| k.len() + approx_json_bytes(v))
+            .sum(),
+        _ => 8,
+    }
+}
+
 /// CloudEvents 1.0 structured-mode JSON (subset we emit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudEvent {

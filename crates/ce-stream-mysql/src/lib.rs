@@ -9,6 +9,7 @@ mod dispatch;
 mod gate;
 mod gtid;
 mod map;
+mod queue;
 mod txn_buffer;
 
 use std::collections::HashMap;
@@ -171,6 +172,14 @@ impl MysqlBinlogSource {
         let payload_mode = self.config.payload_mode;
         let delivery_unit = self.config.delivery_unit;
         let capacity = self.config.queue_capacity.max(1);
+        let part_limits = (self.config.part_max_rows, self.config.part_max_bytes);
+        let queue_max_bytes = if self.config.queue_max_bytes == 0 {
+            ce_stream_core::source::DEFAULT_QUEUE_MAX_BYTES
+        } else {
+            self.config.queue_max_bytes
+        };
+        let queue_bytes = Arc::new(queue::QueueBytes::new(queue_max_bytes as u64));
+        let queue_bytes_bg = Arc::clone(&queue_bytes);
 
         let executed = Arc::new(tokio::sync::Mutex::new(self.initial_executed_set()?));
         let executed_bg = Arc::clone(&executed);
@@ -183,6 +192,9 @@ impl MysqlBinlogSource {
             ?payload_mode,
             ?delivery_unit,
             queue_capacity = capacity,
+            part_max_rows = part_limits.0,
+            part_max_bytes = part_limits.1,
+            queue_max_bytes,
             "starting MySQL binlog source"
         );
 
@@ -202,6 +214,8 @@ impl MysqlBinlogSource {
                 include,
                 executed_bg,
                 payload_mode,
+                part_limits,
+                queue_bytes_bg,
                 tx,
                 stop_bg,
             ))
@@ -211,6 +225,7 @@ impl MysqlBinlogSource {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     Ok(txn) => {
+                        let bytes = queue::delivery_bytes(&txn);
                         let mut shared = executed.lock().await;
                         deliver_committed(
                             txn,
@@ -225,6 +240,7 @@ impl MysqlBinlogSource {
                             &mut on_txn,
                         )
                         .await?;
+                        queue_bytes.release(bytes);
                     }
                     Err(e) => return Err(Error::Source(e)),
                 }
@@ -233,8 +249,17 @@ impl MysqlBinlogSource {
         }
         .await;
 
+        // The reader may be blocked handing the next transaction (or part) to
+        // a queue nobody reads any more: closing the queue ends its wait.
         stop.store(true, Ordering::SeqCst);
-        let _ = join.await;
+        queue_bytes.close();
+        drop(rx);
+        if result.is_ok() {
+            let _ = join.await;
+        }
+        // After an error the reader ends at its next event or send; the
+        // caller gets the error now instead of after the server drops a dump
+        // that is no longer read.
 
         result
     }
@@ -286,6 +311,8 @@ async fn binlog_loop(
     include: IncludeList,
     executed: Arc<tokio::sync::Mutex<ExecutedSet>>,
     payload_mode: PayloadMode,
+    part_limits: (usize, usize),
+    queue_bytes: Arc<queue::QueueBytes>,
     tx: tokio::sync::mpsc::Sender<std::result::Result<CommittedTransaction, String>>,
     stop: Arc<AtomicBool>,
 ) -> std::result::Result<(), String> {
@@ -301,7 +328,7 @@ async fn binlog_loop(
     info!("binlog connected");
 
     let mut tables: HashMap<u64, TableMap> = HashMap::new();
-    let mut txn = TxnBuffer::default();
+    let mut txn = TxnBuffer::with_part_limits(part_limits.0, part_limits.1).with_queue(queue_bytes);
 
     while !stop.load(Ordering::SeqCst) {
         let read = stream.read().await;

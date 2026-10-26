@@ -30,9 +30,11 @@ function Write-CrashHarnessToml {
         [int]$QueueCapacity = 64,
         [int]$MysqlPort = 3306,
         [string]$MysqlHost = "127.0.0.1",
-        [bool]$Tls = $true
+        [bool]$Tls = $true,
+        [int]$PartMaxRows = 0
     )
     $password = Get-CapturePassword
+    $partLine = if ($PartMaxRows -gt 0) { "part_max_rows = $PartMaxRows" } else { "" }
     $cp = $CheckpointPath.Replace('\', '/')
     $tlsLiteral = if ($Tls) { "true" } else { "false" }
     $content = @"
@@ -49,6 +51,7 @@ payload_mode = "full"
 delivery_unit = "$DeliveryUnit"
 queue_capacity = $QueueCapacity
 include_tables = ["ce_stream_spike.t1"]
+$partLine
 
 [checkpoint]
 path = "$cp"
@@ -60,6 +63,23 @@ format = "json"
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($Path, $content, $utf8NoBom)
+}
+
+# Wait until a POST hangs in the sink (-StallAt): the delivery the kill falls on.
+function Wait-SinkStalled {
+    param(
+        [string]$BaseUrl,
+        [int]$TimeoutSec = 120
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $s = Get-SinkStats -BaseUrl $BaseUrl
+        if ([int]$s.stalled -ge 1) {
+            return $s
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "timeout waiting for a stalled sink delivery"
 }
 
 function Get-CheckpointGtid {

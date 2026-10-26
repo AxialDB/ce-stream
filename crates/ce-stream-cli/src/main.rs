@@ -80,6 +80,15 @@ struct SourceSection {
     /// Bounded queue; reader blocks when full (backpressure).
     #[serde(default = "default_queue_capacity")]
     queue_capacity: usize,
+    /// Bytes of row data the queue to the sink holds at most (issue #16).
+    #[serde(default = "default_queue_max_bytes")]
+    queue_max_bytes: usize,
+    /// A long transaction is delivered in parts of at most this many rows.
+    #[serde(default = "default_part_max_rows")]
+    part_max_rows: usize,
+    /// ... and at most this many bytes of row data.
+    #[serde(default = "default_part_max_bytes")]
+    part_max_bytes: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,8 +118,20 @@ fn default_delivery_unit() -> String {
     "row".into()
 }
 
+fn default_queue_max_bytes() -> usize {
+    ce_stream_core::source::DEFAULT_QUEUE_MAX_BYTES
+}
+
 fn default_queue_capacity() -> usize {
     64
+}
+
+fn default_part_max_rows() -> usize {
+    ce_stream_core::source::DEFAULT_PART_MAX_ROWS
+}
+
+fn default_part_max_bytes() -> usize {
+    ce_stream_core::source::DEFAULT_PART_MAX_BYTES
 }
 
 fn default_sink_format() -> String {
@@ -208,10 +229,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = SourceConfig {
+        part_max_rows: cfg.source.part_max_rows,
+        part_max_bytes: cfg.source.part_max_bytes,
         source_id: cfg.source.source_id.clone(),
         include_tables: include_tables.clone(),
         payload_mode,
         queue_capacity: cfg.source.queue_capacity,
+        queue_max_bytes: cfg.source.queue_max_bytes,
         delivery_unit,
     };
 
@@ -396,6 +420,7 @@ async fn seed_mongo(
                 }
             } else {
                 let txn = CommittedTransaction {
+                    part: None,
                     position: Some(SourcePosition {
                         adapter: "mongo".into(),
                         at: payload.clone(),
@@ -535,6 +560,12 @@ fn validate_config(cfg: &FileConfig) -> Result<(), String> {
     }
     if cfg.source.source_id.trim().is_empty() {
         return Err("source.source_id must not be empty (CloudEvents source)".into());
+    }
+    if cfg.source.part_max_rows == 0 || cfg.source.part_max_bytes == 0 {
+        return Err("source.part_max_rows and source.part_max_bytes must be >= 1".into());
+    }
+    if cfg.source.queue_max_bytes == 0 {
+        return Err("source.queue_max_bytes must be >= 1".into());
     }
     if cfg.source.queue_capacity == 0 {
         return Err("source.queue_capacity must be >= 1".into());

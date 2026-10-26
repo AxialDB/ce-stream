@@ -50,6 +50,7 @@ fn row_event() -> CloudEvent {
 
 fn make_txn(gtid: &str, rows: usize) -> CommittedTransaction {
     CommittedTransaction {
+        part: None,
         gtid: gtid.into(),
         gtid_set_after: format!("{gtid}"),
         ddl: vec![],
@@ -424,6 +425,7 @@ async fn ddl_in_commit_row_mode() {
 
     deliver_committed(
         CommittedTransaction {
+            part: None,
             gtid: "abc:1".into(),
             gtid_set_after: "abc:1-1".into(),
             ddl: vec![DdlStatement {
@@ -504,6 +506,7 @@ async fn empty_commit_still_advances_watermark() {
 
     deliver_committed(
         CommittedTransaction {
+            part: None,
             gtid: "abc:1".into(),
             gtid_set_after: "abc:1-1".into(),
             ddl: vec![],

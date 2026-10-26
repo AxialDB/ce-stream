@@ -45,6 +45,13 @@ Transaction mode (one envelope per commit):
 .\scripts\crash-harness\mysql\run-crash-harness.ps1 -DeliveryUnit transaction -SkipBuild
 ```
 
+Transaction in parts ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)): the 7-row transaction is delivered in parts of 3 rows, and ce-stream is killed after the whole first part was taken, between two parts:
+
+```powershell
+.\scripts\crash-harness\mysql\run-crash-harness.ps1 -PartMaxRows 3 -SkipBuild
+.\scripts\crash-harness\mysql\run-crash-harness.ps1 -PartMaxRows 3 -DeliveryUnit transaction -SkipBuild
+```
+
 Optional after editing `my.ini`:
 
 ```powershell
@@ -98,8 +105,8 @@ ce-stream crash harness PASS
 
 Both phases must pass:
 
-1. **After kill:** checkpoint GTID unchanged (no mid-delivery advance).
-2. **After restart:** full 3-row transaction redelivered (row mode) or one envelope (transaction mode).
+1. **After kill:** checkpoint GTID unchanged (no mid-delivery advance, and none after a whole part).
+2. **After restart:** full 3-row transaction redelivered (row mode) or one envelope (transaction mode). With `-PartMaxRows N`: every row again (row mode) or every part again, from part 1 (transaction mode).
 
 See [`mysql/README.md`](mysql/README.md) for scenario details and failure modes.
 
