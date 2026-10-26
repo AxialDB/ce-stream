@@ -69,11 +69,29 @@ fn xid() -> EventData {
 /// Every transaction the events deliver, in order. After each event the
 /// transactions it delivered are taken, so the test also says when.
 fn run(events: Vec<EventData>) -> Vec<(usize, CommittedTransaction)> {
+    expect_no_error(run_with(events, TxnBuffer::default()))
+}
+
+/// [`run`] with parts of at most `rows` rows.
+fn run_in_parts(events: Vec<EventData>, rows: usize) -> Vec<(usize, CommittedTransaction)> {
+    expect_no_error(run_with(events, TxnBuffer::with_part_limits(rows, 0)))
+}
+
+type Run = (Vec<(usize, CommittedTransaction)>, Option<(usize, String)>);
+
+fn expect_no_error((delivered, error): Run) -> Vec<(usize, CommittedTransaction)> {
+    if let Some((at, err)) = error {
+        panic!("event {at}: {err}");
+    }
+    delivered
+}
+
+/// What was delivered until the first error, and the error with its event.
+fn run_with(events: Vec<EventData>, mut txn: TxnBuffer) -> Run {
     let include = IncludeList::from_subjects(["demo.orders"]);
     let (tx, mut rx) = mpsc::channel(64);
     let executed = Arc::new(Mutex::new(ExecutedSet::default()));
     let mut tables = HashMap::new();
-    let mut txn = TxnBuffer::default();
     let mut delivered = Vec::new();
     for (at, event) in events.into_iter().enumerate() {
         let mut ctx = BinlogDispatchCtx {
@@ -85,18 +103,24 @@ fn run(events: Vec<EventData>) -> Vec<(usize, CommittedTransaction)> {
             payload_mode: PayloadMode::Full,
             tx: &tx,
         };
-        dispatch(&mut ctx, event).unwrap_or_else(|err| panic!("event {at}: {err}"));
+        let result = dispatch(&mut ctx, event);
         while let Ok(commit) = rx.try_recv() {
             let commit = commit.expect("commit");
-            executed
-                .try_lock()
-                .expect("executed")
-                .add_committed(&commit.gtid)
-                .expect("add");
+            // As the reader does: a part that is not the last is not a commit.
+            if commit.ends_transaction() {
+                executed
+                    .try_lock()
+                    .expect("executed")
+                    .add_committed(&commit.gtid)
+                    .expect("add");
+            }
             delivered.push((at, commit));
         }
+        if let Err(err) = result {
+            return (delivered, Some((at, err)));
+        }
     }
-    delivered
+    (delivered, None)
 }
 
 /// `TRUNCATE TABLE demo.orders`: a `Gtid` and one `Query`, and no `Xid`.
@@ -176,6 +200,187 @@ fn create_table_select_is_one_transaction_with_its_rows() {
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].0, 4);
     assert_eq!(delivered[0].1.events.len(), 3);
+}
+
+/// The shape of each delivery: rows, DDL statements, part.
+fn shapes(delivered: &[(usize, CommittedTransaction)]) -> Vec<(usize, usize, Option<(u32, bool)>)> {
+    delivered
+        .iter()
+        .map(|(_, c)| {
+            (
+                c.events.len(),
+                c.ddl.len(),
+                c.part.map(|p| (p.number, p.last)),
+            )
+        })
+        .collect()
+}
+
+/// A transaction of exactly one part is delivered whole: no part fields and
+/// no empty last part.
+#[test]
+fn a_transaction_of_exactly_one_part_is_whole() {
+    let delivered = run_in_parts(
+        vec![gtid(1), query("BEGIN"), table_map(), write_rows(3), xid()],
+        3,
+    );
+    assert_eq!(shapes(&delivered), [(3, 0, None)]);
+    assert_eq!(delivered[0].1.gtid_set_after, "uuid:1-1");
+}
+
+/// One row more than a part: the part goes out when the extra row is read,
+/// the last part at the `Xid`. Only the last part carries the executed set,
+/// on the delivery and on its rows.
+#[test]
+fn one_row_more_than_a_part_is_two_parts() {
+    let delivered = run_in_parts(
+        vec![gtid(1), query("BEGIN"), table_map(), write_rows(4), xid()],
+        3,
+    );
+    assert_eq!(
+        shapes(&delivered),
+        [(3, 0, Some((1, false))), (1, 0, Some((2, true)))]
+    );
+    let (at, first) = &delivered[0];
+    assert_eq!(*at, 3, "the part goes out while the rows are read");
+    assert_eq!(first.gtid, "uuid:1");
+    assert_eq!(first.gtid_set_after, "");
+    assert!(first
+        .events
+        .iter()
+        .all(|e| !e.extensions.contains_key("gtidset")));
+    let (at, last) = &delivered[1];
+    assert_eq!(*at, 4, "the last part at the Xid");
+    assert_eq!(last.gtid, "uuid:1");
+    assert_eq!(last.gtid_set_after, "uuid:1-1");
+}
+
+/// Rows of one transaction in several row events fill parts across them.
+#[test]
+fn parts_are_cut_across_row_events() {
+    let delivered = run_in_parts(
+        vec![
+            gtid(1),
+            query("BEGIN"),
+            table_map(),
+            write_rows(2),
+            table_map(),
+            write_rows(2),
+            table_map(),
+            write_rows(3),
+            xid(),
+        ],
+        3,
+    );
+    assert_eq!(
+        shapes(&delivered),
+        [
+            (3, 0, Some((1, false))),
+            (3, 0, Some((2, false))),
+            (1, 0, Some((3, true)))
+        ]
+    );
+    let at: Vec<usize> = delivered.iter().map(|(at, _)| *at).collect();
+    assert_eq!(at, [5, 7, 8]);
+}
+
+/// `CREATE TABLE ... SELECT` in parts: its statement stays in front of its
+/// rows, in the first part, and the later parts carry rows only.
+#[test]
+fn create_table_select_in_parts_keeps_its_statement_first() {
+    let ctas = "CREATE TABLE `demo`.`orders` (\n  `id` int NOT NULL\n) START TRANSACTION";
+    let delivered = run_in_parts(
+        vec![
+            gtid(1),
+            query("BEGIN"),
+            query(ctas),
+            table_map(),
+            write_rows(5),
+            xid(),
+        ],
+        2,
+    );
+    assert_eq!(
+        shapes(&delivered),
+        [
+            (2, 1, Some((1, false))),
+            (2, 0, Some((2, false))),
+            (1, 0, Some((3, true)))
+        ]
+    );
+    assert_eq!(delivered[0].1.ddl[0].query, ctas);
+}
+
+/// A `ROLLBACK` after parts of the transaction were delivered stops the
+/// stream: MySQL with `gtid_mode=ON` does not write one, and the consumer
+/// could not be told to drop the parts it holds. Before the first part the
+/// transaction is not delivered, as before parts existed.
+#[test]
+fn a_rollback_after_a_delivered_part_stops_the_stream() {
+    let (delivered, error) = run_with(
+        vec![
+            gtid(1),
+            query("BEGIN"),
+            table_map(),
+            write_rows(4),
+            query("ROLLBACK"),
+            gtid(2),
+            query("TRUNCATE TABLE demo.orders"),
+        ],
+        TxnBuffer::with_part_limits(3, 0),
+    );
+    assert_eq!(shapes(&delivered), [(3, 0, Some((1, false)))]);
+    let (at, err) = error.expect("the stream stops");
+    assert_eq!(at, 4, "at the ROLLBACK");
+    assert!(err.contains("uuid:1") && err.contains("ROLLBACK"), "{err}");
+
+    let delivered = run_in_parts(
+        vec![
+            gtid(1),
+            query("BEGIN"),
+            table_map(),
+            write_rows(3),
+            query("ROLLBACK"),
+            gtid(2),
+            query("TRUNCATE TABLE demo.orders"),
+        ],
+        3,
+    );
+    let gtids: Vec<&str> = delivered.iter().map(|(_, c)| c.gtid.as_str()).collect();
+    assert_eq!(
+        gtids,
+        ["uuid:2"],
+        "no part went out: not delivered, as before"
+    );
+}
+
+/// The next transaction after one in parts starts again at part 1, or whole.
+#[test]
+fn the_transaction_after_one_in_parts_is_whole_again() {
+    let delivered = run_in_parts(
+        vec![
+            gtid(1),
+            query("BEGIN"),
+            table_map(),
+            write_rows(4),
+            xid(),
+            gtid(2),
+            query("BEGIN"),
+            table_map(),
+            write_rows(2),
+            xid(),
+        ],
+        3,
+    );
+    assert_eq!(
+        shapes(&delivered),
+        [
+            (3, 0, Some((1, false))),
+            (1, 0, Some((2, true))),
+            (2, 0, None)
+        ]
+    );
+    assert_eq!(delivered[2].1.gtid_set_after, "uuid:1-2");
 }
 
 /// A table without transactions (MyISAM): `BEGIN`, rows, and a `COMMIT`

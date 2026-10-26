@@ -27,7 +27,24 @@ pub struct SourceConfig {
     pub queue_capacity: usize,
     /// Per-row vs per-transaction delivery after commit.
     pub delivery_unit: DeliveryUnit,
+    /// A transaction is delivered in parts of at most this many rows
+    /// ([`crate::TransactionPart`]). Default 10,000.
+    pub part_max_rows: usize,
+    /// ... and at most this many bytes of row data, whichever comes first. A
+    /// single row larger than this is a part of its own. Default 16 MB.
+    pub part_max_bytes: usize,
+    /// The deliveries waiting for the consumer hold at most this many bytes of
+    /// row data, besides `queue_capacity` deliveries. One delivery always
+    /// fits an empty queue. Default 32 MB (two parts). 0 is the default.
+    pub queue_max_bytes: usize,
 }
+
+/// Default of [`SourceConfig::part_max_rows`].
+pub const DEFAULT_PART_MAX_ROWS: usize = 10_000;
+/// Default of [`SourceConfig::part_max_bytes`]: 16 MB.
+pub const DEFAULT_PART_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Default of [`SourceConfig::queue_max_bytes`]: 32 MB, two parts.
+pub const DEFAULT_QUEUE_MAX_BYTES: usize = 2 * DEFAULT_PART_MAX_BYTES;
 
 impl Default for SourceConfig {
     fn default() -> Self {
@@ -37,6 +54,9 @@ impl Default for SourceConfig {
             payload_mode: PayloadMode::Full,
             queue_capacity: 64,
             delivery_unit: DeliveryUnit::Row,
+            part_max_rows: DEFAULT_PART_MAX_ROWS,
+            part_max_bytes: DEFAULT_PART_MAX_BYTES,
+            queue_max_bytes: DEFAULT_QUEUE_MAX_BYTES,
         }
     }
 }

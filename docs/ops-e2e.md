@@ -89,7 +89,7 @@ Validates [#1](https://github.com/AxialDB/ce-stream/issues/1): kill ce-stream af
 - Windows: `.\scripts\crash-harness\mysql\run-crash-harness.ps1`
 - WSL Ubuntu (port 3307): `.\scripts\crash-harness\mysql\run-crash-harness.ps1 -Wsl`
 
-Requires `binlog_row_metadata=FULL`, `CE_STREAM_PASSWORD`, `MYSQL_DEFAULTS_FILE`, and `ce-stream-perf-sink --stall-after 1`. Lab-only (not GitHub Actions). Expected result: **PASS**.
+Requires `binlog_row_metadata=FULL`, `CE_STREAM_PASSWORD`, `MYSQL_DEFAULTS_FILE`, and `ce-stream-perf-sink --stall-at N` (the sink hangs on the Nth POST; the harness picks N). Lab-only (not GitHub Actions). Expected result: **PASS**.
 
 Unit tests (no MySQL): `cargo test -p ce-stream-mysql --test txn_checkpoint`.
 

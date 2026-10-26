@@ -14,6 +14,8 @@ SKIP_BUILD=0
 RESTART_MYSQL=0
 DELIVERY_UNIT="row"
 TXN_ROWS=3
+TXN_ROWS_SET=0
+PART_MAX_ROWS=0
 LISTEN_PORT=18082
 SERVER_ID=19301
 
@@ -28,18 +30,46 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=1; shift ;;
         --restart-mysql) RESTART_MYSQL=1; shift ;;
         --delivery-unit) DELIVERY_UNIT="$2"; shift 2 ;;
-        --txn-rows) TXN_ROWS="$2"; shift 2 ;;
+        --txn-rows) TXN_ROWS="$2"; TXN_ROWS_SET=1; shift 2 ;;
+        --part-max-rows) PART_MAX_ROWS="$2"; shift 2 ;;
         --listen-port) LISTEN_PORT="$2"; shift 2 ;;
         --server-id) SERVER_ID="$2"; shift 2 ;;
         --mysql-port) MYSQL_PORT="$2"; shift 2 ;;
         --mysql-defaults) MYSQL_DEFAULTS_FILE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--setup-lab] [--skip-build] [--restart-mysql] [--delivery-unit row|transaction]"
+            echo "Usage: $0 [--setup-lab] [--skip-build] [--restart-mysql] [--delivery-unit row|transaction] [--txn-rows N] [--part-max-rows N]"
             exit 0
             ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+# The sink answers the deliveries before STALL_AT and hangs on that one; the
+# kill falls on it. Without parts that is the second row (row mode) or the one
+# envelope (transaction mode). With parts (issue #16) it is the first delivery
+# of the second part, after the whole first part was taken: the kill falls
+# between two parts of one transaction.
+STALL_AT=2
+EXPECTED_DELIVERIES=1
+if [[ "$DELIVERY_UNIT" != "row" ]]; then
+    STALL_AT=1
+fi
+if [[ "$PART_MAX_ROWS" -gt 0 ]]; then
+    if [[ "$TXN_ROWS_SET" -eq 0 ]]; then
+        TXN_ROWS=$((2 * PART_MAX_ROWS + 1))
+    fi
+    if [[ "$TXN_ROWS" -le "$PART_MAX_ROWS" ]]; then
+        echo "--txn-rows must be larger than --part-max-rows" >&2
+        exit 1
+    fi
+    if [[ "$DELIVERY_UNIT" == "row" ]]; then
+        STALL_AT=$((PART_MAX_ROWS + 1))
+    else
+        STALL_AT=2
+        EXPECTED_DELIVERIES=$(((TXN_ROWS + PART_MAX_ROWS - 1) / PART_MAX_ROWS))
+    fi
+fi
+ANSWERED_BEFORE_KILL=$((STALL_AT - 1))
 
 CE_STREAM_REPO=$(ce_stream_repo_root)
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/ce-stream-target}"
@@ -88,7 +118,7 @@ if [[ ! -x "$SINK_BIN" || ! -x "$CLI_BIN" ]]; then
     exit 1
 fi
 
-write_crash_harness_toml "$TOML_PATH" "$SINK_URL" "$CHECKPOINT_PATH" "$DELIVERY_UNIT" "$SERVER_ID"
+write_crash_harness_toml "$TOML_PATH" "$SINK_URL" "$CHECKPOINT_PATH" "$DELIVERY_UNIT" "$SERVER_ID" 64 "$PART_MAX_ROWS"
 
 SINK_LOG="$RUN_DIR/sink.log"
 SINK_ERR="$RUN_DIR/sink.err"
@@ -107,9 +137,9 @@ cleanup() {
 trap cleanup EXIT
 
 start_perf_sink() {
-    local stall_after=${1:-0}
+    local stall_at=${1:-0}
     # shellcheck disable=SC2086
-    "$SINK_BIN" --listen "127.0.0.1:${LISTEN_PORT}" --delay-ms 0 --stall-after "$stall_after" \
+    "$SINK_BIN" --listen "127.0.0.1:${LISTEN_PORT}" --delay-ms 0 --stall-at "$stall_at" \
         >"$SINK_LOG" 2>"$SINK_ERR" &
     SINK_PID=$!
 }
@@ -145,16 +175,20 @@ echo "Warmup checkpoint gtid: ${WARMUP_GTID}"
 
 reset_sink_stats "$BASE_URL"
 
-echo "Phase 2: ${TXN_ROWS}-row txn, stall sink after row 1, kill ce-stream mid-fanout ..."
+if [[ "$PART_MAX_ROWS" -gt 0 ]]; then
+    echo "Phase 2: ${TXN_ROWS}-row txn in parts of ${PART_MAX_ROWS}, sink hangs on delivery ${STALL_AT} (the second part), kill ce-stream between parts ..."
+else
+    echo "Phase 2: ${TXN_ROWS}-row txn, sink hangs on delivery ${STALL_AT}, kill ce-stream mid-delivery ..."
+fi
 stop_pid_safe "$SINK_PID"
 SINK_PID=""
-start_perf_sink 1
+start_perf_sink "$STALL_AT"
 sleep 1
 reset_sink_stats "$BASE_URL"
 
 CRASH_TAG="crash-${RUN_ID}"
 invoke_mysql_sql "crash-txn" "$(new_multi_row_txn_sql "$CRASH_TAG" "$TXN_ROWS")"
-wait_sink_count "$BASE_URL" 1 60 >/dev/null
+wait_sink_stalled "$BASE_URL" 60 >/dev/null
 PARTIAL_STATS=$(get_sink_stats "$BASE_URL")
 sleep 0.1
 stop_pid_safe "$CLI_PID"
@@ -170,8 +204,8 @@ fi
 echo "Checkpoint unchanged after kill (expected)."
 
 PARTIAL_COUNT=$(printf '%s' "$PARTIAL_STATS" | sed -n 's/.*"received":\([0-9]*\).*/\1/p')
-if [[ "${PARTIAL_COUNT:-0}" -ne 1 ]]; then
-    echo "expected 1 partial delivery before kill, got ${PARTIAL_COUNT:-0}" >&2
+if [[ "${PARTIAL_COUNT:-0}" -ne "$ANSWERED_BEFORE_KILL" ]]; then
+    echo "expected ${ANSWERED_BEFORE_KILL} answered deliveries before kill, got ${PARTIAL_COUNT:-0}" >&2
     exit 1
 fi
 
@@ -200,8 +234,13 @@ if [[ "$DELIVERY_UNIT" == "row" ]]; then
     fi
     echo "Redelivered ${REDELIVERED} row CloudEvents (>= ${TXN_ROWS})."
 else
-    wait_sink_count "$BASE_URL" 1 90 >/dev/null
-    echo "Redelivered 1 committed-transaction envelope."
+    wait_sink_count "$BASE_URL" "$EXPECTED_DELIVERIES" 90 >/dev/null
+    REDELIVERED=$(get_sink_stats "$BASE_URL" | sed -n 's/.*"received":\([0-9]*\).*/\1/p')
+    if [[ "${REDELIVERED:-0}" -lt "$EXPECTED_DELIVERIES" ]]; then
+        echo "expected ${EXPECTED_DELIVERIES} committed-transaction envelopes, got ${REDELIVERED:-0}" >&2
+        exit 1
+    fi
+    echo "Redelivered ${REDELIVERED} committed-transaction envelope(s) (expected ${EXPECTED_DELIVERIES})."
 fi
 
 FINAL_GTID=$(wait_checkpoint_gtid "$CHECKPOINT_PATH" 60)
@@ -220,10 +259,11 @@ cat >"$SUMMARY_PATH" <<EOF
   "mysql_port": ${MYSQL_PORT},
   "delivery_unit": "${DELIVERY_UNIT}",
   "txn_rows": ${TXN_ROWS},
+  "part_max_rows": ${PART_MAX_ROWS},
   "warmup_gtid": "${WARMUP_GTID}",
   "gtid_after_kill": "${GTID_AFTER_KILL}",
   "final_gtid": "${FINAL_GTID}",
-  "partial_deliveries": 1,
+  "partial_deliveries": ${ANSWERED_BEFORE_KILL},
   "redelivery_mode": "${DELIVERY_UNIT}",
   "pass": true,
   "artifacts": "${RUN_DIR}"

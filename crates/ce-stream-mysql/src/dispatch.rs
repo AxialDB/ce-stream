@@ -29,6 +29,10 @@ where
 {
     let gtid = txn.gtid.clone();
     let gtid_set_after = txn.gtid_set_after.clone();
+    // A part that is not the last is not a commit: the transaction is not
+    // executed until its last part, and a restart before it reads the
+    // transaction again from its start.
+    let ends = txn.ends_transaction();
     match ctx.delivery_unit {
         DeliveryUnit::Row => {
             for stmt in &txn.ddl {
@@ -46,6 +50,9 @@ where
         DeliveryUnit::Transaction => on_txn(txn)?,
     }
 
+    if !ends {
+        return Ok(());
+    }
     ctx.executed.add_committed(&gtid)?;
     persist_gtid_set(
         ctx.executed.to_set_string(),
@@ -133,12 +140,79 @@ mod tests {
             })
             .collect();
         CommittedTransaction {
+            part: None,
             gtid: gtid.into(),
             gtid_set_after: format!("{gtid}"),
             ddl: vec![],
             events,
             ..Default::default()
         }
+    }
+
+    /// A part that is not the last is delivered and moves nothing: neither
+    /// the executed set nor the checkpoint. The last part moves both.
+    #[tokio::test]
+    async fn only_the_last_part_moves_the_checkpoint() {
+        use ce_stream_core::transaction::TransactionPart;
+        let mut executed = ExecutedSet::default();
+        let store = MemStore {
+            saved: Mutex::new(None),
+        };
+        let mut checkpoint_store: Option<Box<dyn CheckpointStore>> = Some(Box::new(store));
+        let mut checkpoint = None;
+        let delivered = Cell::new(0u32);
+        let mut first = sample_txn("3e11fa47-71ca-11e1-9e33-c080020c9a66:1", 2);
+        first.gtid_set_after = String::new();
+        first.part = Some(TransactionPart {
+            number: 1,
+            last: false,
+        });
+        deliver_committed(
+            first,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Transaction,
+            ),
+            &mut |_| Ok(()),
+            &mut |_| {
+                delivered.set(delivered.get() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(delivered.get(), 1);
+        assert!(checkpoint.is_none(), "a part is not a commit");
+        assert_eq!(executed.to_set_string(), "");
+        let mut last = sample_txn("3e11fa47-71ca-11e1-9e33-c080020c9a66:1", 1);
+        last.part = Some(TransactionPart {
+            number: 2,
+            last: true,
+        });
+        deliver_committed(
+            last,
+            &mut deliver_ctx(
+                &mut executed,
+                &mut checkpoint_store,
+                &mut checkpoint,
+                DeliveryUnit::Transaction,
+            ),
+            &mut |_| Ok(()),
+            &mut |_| {
+                delivered.set(delivered.get() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(delivered.get(), 2);
+        assert!(checkpoint.is_some());
+        assert_eq!(
+            executed.to_set_string(),
+            "3e11fa47-71ca-11e1-9e33-c080020c9a66:1-1"
+        );
     }
 
     #[tokio::test]
@@ -225,6 +299,7 @@ mod tests {
         let mut types: Vec<String> = Vec::new();
 
         let txn = CommittedTransaction {
+            part: None,
             gtid: "abc:1".into(),
             gtid_set_after: "abc:1-1".into(),
             ddl: vec![DdlStatement {
@@ -270,6 +345,7 @@ mod tests {
 
         deliver_committed(
             CommittedTransaction {
+                part: None,
                 gtid: "abc:2".into(),
                 gtid_set_after: "abc:1-2".into(),
                 ddl: vec![DdlStatement {
@@ -310,6 +386,7 @@ mod tests {
 
         deliver_committed(
             CommittedTransaction {
+                part: None,
                 gtid: "abc:1".into(),
                 gtid_set_after: "abc:1-1".into(),
                 ddl: vec![DdlStatement {

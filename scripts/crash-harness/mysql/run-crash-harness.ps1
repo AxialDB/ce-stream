@@ -1,4 +1,6 @@
 # Gate 0 manual crash harness: kill ce-stream after first post-commit row, restart, assert full txn redelivery.
+# -PartMaxRows N (issue #16): the transaction is delivered in parts of N rows; the kill falls
+# after the whole first part was taken, between two parts of one transaction.
 # Run from ce-stream repo root. Requires MySQL 9.x lab + CE_STREAM_PASSWORD.
 # ASCII-only (Windows PowerShell 5.1).
 
@@ -12,7 +14,8 @@ param(
     [switch]$SkipLinuxInstall,
     [ValidateSet("row", "transaction")]
     [string]$DeliveryUnit = "row",
-    [int]$TxnRows = 3,
+    [int]$TxnRows = 0,
+    [int]$PartMaxRows = 0,
     [int]$ListenPort = 18082,
     [int]$ServerId = 19301,
     [int]$MysqlPort = 3306,
@@ -28,6 +31,30 @@ $HarnessDir = $PSScriptRoot
 . (Join-Path $HarnessDir "..\..\perf\_common.ps1")
 
 $repoRoot = Get-CeStreamRepoRoot
+
+$txnRowsSet = $TxnRows -gt 0
+if (-not $txnRowsSet) {
+    $TxnRows = if ($PartMaxRows -gt 0) { 2 * $PartMaxRows + 1 } else { 3 }
+}
+# The sink answers the deliveries before $stallAt and hangs on that one; the kill falls on
+# it. Without parts that is the second row (row mode) or the one envelope (transaction
+# mode). With parts it is the first delivery of the second part, after the whole first
+# part was taken.
+$stallAt = if ($DeliveryUnit -eq "row") { 2 } else { 1 }
+$expectedDeliveries = 1
+if ($PartMaxRows -gt 0) {
+    if ($TxnRows -le $PartMaxRows) {
+        throw "-TxnRows must be larger than -PartMaxRows"
+    }
+    if ($DeliveryUnit -eq "row") {
+        $stallAt = $PartMaxRows + 1
+    }
+    else {
+        $stallAt = 2
+        $expectedDeliveries = [int][Math]::Ceiling($TxnRows / $PartMaxRows)
+    }
+}
+$answeredBeforeKill = $stallAt - 1
 
 if ($Wsl) {
     $linuxScript = Join-Path $HarnessDir "run-crash-harness.sh"
@@ -61,7 +88,8 @@ if ($Wsl) {
     if ($SkipBuild) { $runArgs += "--skip-build" }
     if ($RestartMysql) { $runArgs += "--restart-mysql" }
     if ($DeliveryUnit -ne "row") { $runArgs += @("--delivery-unit", $DeliveryUnit) }
-    if ($TxnRows -ne 3) { $runArgs += @("--txn-rows", "$TxnRows") }
+    if ($txnRowsSet) { $runArgs += @("--txn-rows", "$TxnRows") }
+    if ($PartMaxRows -gt 0) { $runArgs += @("--part-max-rows", "$PartMaxRows") }
     if ($ListenPort -ne 18082) { $runArgs += @("--listen-port", "$ListenPort") }
     if ($ServerId -ne 19301) { $runArgs += @("--server-id", "$ServerId") }
     $runArgs += @("--mysql-port", "$WslMysqlPort")
@@ -126,7 +154,8 @@ if (-not (Test-Path $cliExe)) { throw "missing $cliExe" }
 
 $useTls = $MysqlTls.IsPresent
 Write-CrashHarnessToml -Path $tomlPath -SinkUrl $sinkUrl -CheckpointPath $checkpointPath `
-    -DeliveryUnit $DeliveryUnit -ServerId $ServerId -MysqlPort $MysqlPort -MysqlHost $MysqlHost -Tls $useTls
+    -DeliveryUnit $DeliveryUnit -ServerId $ServerId -MysqlPort $MysqlPort -MysqlHost $MysqlHost -Tls $useTls `
+    -PartMaxRows $PartMaxRows
 
 $sinkLog = Join-Path $runDir "sink.log"
 $sinkErr = Join-Path $runDir "sink.err"
@@ -142,11 +171,11 @@ function Start-PerfSink {
     param(
         [string]$StdoutLog,
         [string]$StderrLog,
-        [int]$StallAfter = 0
+        [int]$StallAt = 0
     )
     $args = @("--listen", "127.0.0.1:$ListenPort", "--delay-ms", "0")
-    if ($StallAfter -gt 0) {
-        $args += @("--stall-after", "$StallAfter")
+    if ($StallAt -gt 0) {
+        $args += @("--stall-at", "$StallAt")
     }
     return Start-Process -FilePath $sinkExe `
         -ArgumentList $args `
@@ -171,7 +200,7 @@ function Start-Capture {
 
 try {
     Write-Host "Starting perf sink on $baseUrl ..."
-    $sinkProc = Start-PerfSink -StdoutLog $sinkLog -StderrLog $sinkErr -StallAfter 0
+    $sinkProc = Start-PerfSink -StdoutLog $sinkLog -StderrLog $sinkErr -StallAt 0
 
     Start-Sleep -Seconds 1
     Reset-SinkStats -BaseUrl $baseUrl
@@ -196,9 +225,14 @@ try {
 
     Reset-SinkStats -BaseUrl $baseUrl
 
-    Write-Host "Phase 2: $TxnRows-row txn, stall sink after row 1, kill ce-stream mid-fanout ..."
+    if ($PartMaxRows -gt 0) {
+        Write-Host "Phase 2: $TxnRows-row txn in parts of $PartMaxRows, sink hangs on delivery $stallAt (the second part), kill ce-stream between parts ..."
+    }
+    else {
+        Write-Host "Phase 2: $TxnRows-row txn, sink hangs on delivery $stallAt, kill ce-stream mid-delivery ..."
+    }
     Stop-ProcessSafe -Proc $sinkProc
-    $sinkProc = Start-PerfSink -StdoutLog $sinkLog -StderrLog $sinkErr -StallAfter 1
+    $sinkProc = Start-PerfSink -StdoutLog $sinkLog -StderrLog $sinkErr -StallAt $stallAt
     Start-Sleep -Seconds 1
     Reset-SinkStats -BaseUrl $baseUrl
 
@@ -206,7 +240,7 @@ try {
     $txnSql = New-MultiRowTxnSql -Prefix $crashTag -Rows $TxnRows
     Invoke-MysqlSqlFile -MysqlArgs $mysqlArgs -Sql $txnSql -Label "crash-txn"
 
-    $null = Wait-SinkCount -BaseUrl $baseUrl -Expected 1 -TimeoutSec 60
+    $null = Wait-SinkStalled -BaseUrl $baseUrl -TimeoutSec 60
     $partialStats = Get-SinkStats -BaseUrl $baseUrl
     Start-Sleep -Milliseconds 100
     Stop-ProcessSafe -Proc $cliProc
@@ -220,12 +254,12 @@ try {
     }
     Write-Host "Checkpoint unchanged after kill (expected)."
 
-    if ([int]$partialStats.received -ne 1) {
-        throw ("expected 1 partial delivery before kill, got {0}" -f $partialStats.received)
+    if ([int]$partialStats.received -ne $answeredBeforeKill) {
+        throw ("expected {0} answered deliveries before kill, got {1}" -f $answeredBeforeKill, $partialStats.received)
     }
 
     Write-Host "Phase 3: restart ce-stream, expect full txn redelivery ..."
-    $sinkProc = Start-PerfSink -StdoutLog $sinkLog -StderrLog $sinkErr -StallAfter 0
+    $sinkProc = Start-PerfSink -StdoutLog $sinkLog -StderrLog $sinkErr -StallAt 0
     Start-Sleep -Seconds 1
     Reset-SinkStats -BaseUrl $baseUrl
     $cliProc = Start-Capture -StdoutLog $cliLog2 -StderrLog $cliErr2
@@ -247,8 +281,12 @@ try {
         Write-Host "Redelivered $redelivered row CloudEvents (>= $TxnRows)."
     }
     else {
-        $null = Wait-SinkCount -BaseUrl $baseUrl -Expected 1 -TimeoutSec 90
-        Write-Host "Redelivered 1 committed-transaction envelope."
+        $null = Wait-SinkCount -BaseUrl $baseUrl -Expected $expectedDeliveries -TimeoutSec 90
+        $redelivered = [int](Get-SinkStats -BaseUrl $baseUrl).received
+        if ($redelivered -lt $expectedDeliveries) {
+            throw ("expected {0} committed-transaction envelopes, got {1}" -f $expectedDeliveries, $redelivered)
+        }
+        Write-Host "Redelivered $redelivered committed-transaction envelope(s) (expected $expectedDeliveries)."
     }
 
     $finalGtid = Wait-CheckpointGtid -Path $checkpointPath -TimeoutSec 60
@@ -264,10 +302,11 @@ try {
         mysql_port = $MysqlPort
         delivery_unit = $DeliveryUnit
         txn_rows = $TxnRows
+        part_max_rows = $PartMaxRows
         warmup_gtid = $warmupGtid
         gtid_after_kill = $gtidAfterKill
         final_gtid = $finalGtid
-        partial_deliveries = 1
+        partial_deliveries = $answeredBeforeKill
         redelivery_mode = $DeliveryUnit
         pass = $true
         artifacts = $runDir

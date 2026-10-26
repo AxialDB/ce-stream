@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ce_stream_core::event::{ChangeOp, CloudEvent, PayloadMode, TableRef};
+use ce_stream_core::event::{approx_json_bytes, ChangeOp, CloudEvent, PayloadMode, TableRef};
 use ce_stream_core::transaction::CommittedTransaction;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::table_map_event::TableMapEvent;
@@ -121,7 +121,22 @@ fn buffer_query(
                 Ok(())
             }
         }
-        ddl::QueryKind::Rollback => Ok(()),
+        // MySQL writes a transaction to the binlog only when it commits, and a
+        // server with `gtid_mode=ON` (a capture gate) never ends one with
+        // `ROLLBACK`. Should one come all the same after parts of it were
+        // passed on, the consumer could not be told to drop them: stop.
+        // Before any part it is not delivered, as it always was.
+        ddl::QueryKind::Rollback => {
+            if ctx.txn.parts_sent() > 0 {
+                return Err(format!(
+                    "transaction {} ended with ROLLBACK after {} of its parts were delivered; \
+                     MySQL does not write such a transaction with gtid_mode=ON",
+                    ctx.txn.pending_gtid().unwrap_or("?"),
+                    ctx.txn.parts_sent()
+                ));
+            }
+            Ok(())
+        }
         ddl::QueryKind::Ddl => {
             ctx.txn
                 .pending_gtid()
@@ -171,6 +186,7 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
         return Err("XID without pending GTID".into());
     };
 
+    ctx.txn.reserve_queue(&commit)?;
     ctx.tx
         .blocking_send(Ok(commit))
         .map_err(|_| "event channel closed".to_string())
@@ -289,8 +305,19 @@ where
             );
         }
 
+        // A full part goes out when one more row comes, so that a transaction
+        // of exactly one part is delivered whole, with no empty last part.
+        if ctx.txn.part_full() {
+            if let Some(part) = ctx.txn.take_part() {
+                ctx.txn.reserve_queue(&part)?;
+                ctx.tx
+                    .blocking_send(Ok(part))
+                    .map_err(|_| "event channel closed".to_string())?;
+            }
+        }
+        let bytes = approx_json_bytes(&data);
         let event = CloudEvent::row_change(ctx.source_id, &table, op, data, extensions);
-        ctx.txn.push_row(event);
+        ctx.txn.push_row_sized(event, bytes);
     }
 
     Ok(())
