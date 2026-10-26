@@ -7,7 +7,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Long transactions in parts ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)). Planned as 0.5.0.
+## [0.5.0] - 2026-10-25
+
+Long transactions in parts ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)).
 Release notes: [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md).
 
 ### Added

@@ -25,15 +25,15 @@ Install the CLI from crates.io:
 cargo install ce-stream-cli
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/AxialDB/ce-stream/releases) (latest: [`v0.4.3`](https://github.com/AxialDB/ce-stream/releases/tag/v0.4.3) - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no database).
+Pre-built binaries: [GitHub Releases](https://github.com/AxialDB/ce-stream/releases) (latest: [`v0.5.0`](https://github.com/AxialDB/ce-stream/releases/tag/v0.5.0) - Linux x64 and Windows x64, see `SHA256SUMS`). Built in CI on `ubuntu-latest` and `windows-latest` (no database).
 
-### v0.4.3 highlights
+### v0.5.0 highlights
 
-- **MySQL: a DDL statement on its own is delivered** — `CREATE TABLE`, `ALTER TABLE`, `TRUNCATE TABLE`, `DROP TABLE` and the like arrive as DDL, and their GTIDs enter the executed set ([#13](https://github.com/AxialDB/ce-stream/issues/13)).
-- **MySQL: transactions that end with `COMMIT`** — changes to a table without transactions (MyISAM) are delivered.
-- **`gtid_set_after` names every commit before it** — also while commits wait in the queue.
+- **Long transactions in parts** — a MySQL or MongoDB transaction larger than `part_max_rows` (10,000) or `part_max_bytes` (16 MB of row data) is delivered in parts as it is read, so its memory is bounded by a part ([#16](https://github.com/AxialDB/ce-stream/issues/16)). Only the last part carries the position after the transaction and moves the checkpoint.
+- **MySQL: the queue to the consumer is bounded by bytes** — `queue_max_bytes` (32 MB) besides `queue_capacity` deliveries.
+- **MySQL: a delivery the consumer refused no longer hangs the stream**, and a `ROLLBACK` after a delivered part stops it with an error.
 
-See [`docs/releases/v0.4.3.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.4.3.md) and [`CHANGELOG.md`](https://github.com/AxialDB/ce-stream/blob/main/CHANGELOG.md).
+See [`docs/releases/v0.5.0.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.5.0.md) and [`CHANGELOG.md`](https://github.com/AxialDB/ce-stream/blob/main/CHANGELOG.md).
 
 Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (required; validated at connect).
 
