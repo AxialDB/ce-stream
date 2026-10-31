@@ -1,0 +1,37 @@
+{
+  "type": "record",
+  "name": "TableSchema",
+  "namespace": "io.ce_stream.v1",
+  "doc": "The definition of a table as the host announces it (issue #19). Schema id: ce-stream.table-schema.v1",
+  "fields": [
+    { "name": "database", "type": "string" },
+    { "name": "table", "type": "string" },
+    {
+      "name": "identity",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "An identity that survives a rename, where the host has one"
+    },
+    {
+      "name": "columns",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "ColumnSchema",
+          "fields": [
+            { "name": "name", "type": "string" },
+            { "name": "host_type", "type": "string" },
+            {
+              "name": "nullable",
+              "type": ["null", "boolean"],
+              "default": null,
+              "doc": "Set only where the host says it"
+            },
+            { "name": "key", "type": "boolean" }
+          ]
+        }
+      }
+    }
+  ]
+}

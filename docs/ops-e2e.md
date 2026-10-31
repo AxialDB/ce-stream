@@ -1,6 +1,6 @@
 # Ops / E2E / production
 
-**Status:** Phase 3–4 path complete (JSON HTTP E2E + continuous prod). Optional Avro: `sink.format = "avro"` ([`avro.md`](avro.md)). Other DB engines deferred.
+**Status:** Phase 3–4 path complete (JSON HTTP E2E + continuous prod). Optional Avro: `sink.format = "avro"` ([`avro.md`](avro.md)). PostgreSQL: [below](#postgresql-prerequisites).
 
 Happy path: MySQL 9.x **replica** -> ce-stream (continuous) -> HTTP CloudEvents (JSON default).
 
@@ -22,6 +22,57 @@ SET PERSIST enforce_gtid_consistency = ON;
 On startup, ce-stream runs capture gate checks via `SHOW VARIABLES`. Use `--skip-gate-check` only in lab environments.
 
 Replication user: `REPLICATION SLAVE`, `REPLICATION CLIENT`, typically `SELECT` (`scripts/spike-setup.sql`).
+
+## PostgreSQL prerequisites
+
+```sql
+ALTER SYSTEM SET wal_level = logical;  -- then restart the server
+
+CREATE ROLE ce_stream LOGIN REPLICATION PASSWORD '...';
+GRANT CONNECT ON DATABASE app TO ce_stream;
+
+ALTER TABLE public.orders REPLICA IDENTITY FULL;
+CREATE PUBLICATION ce_stream FOR TABLE public.orders;
+```
+
+`pgoutput` needs no `SELECT`. `pg_hba.conf` matches a logical replication connection with an ordinary database line, not `replication`. Authentication is SCRAM-SHA-256.
+
+```toml
+[source]
+adapter = "postgres"
+source_id = "postgres://127.0.0.1:5432/app"
+host = "127.0.0.1"
+port = 5432
+user = "ce_stream"
+password = "..."
+database = "app"
+tls = true
+# tls_ca = "ca.pem"             # verifies the certificate and name; without it, TLS only encrypts
+slot = "ce_stream_app"
+create_slot = true              # otherwise a missing slot is an error
+# publication = "ce_stream"     # the default
+# min_server_version = "17"     # the default
+# message_prefixes = []         # logical messages to deliver
+# checkpoint = "on_ok"          # or on_confirm, with delivery_unit = "transaction"
+include_tables = ["public.orders"]
+```
+
+A subject is `schema.table`. The gate reports all of these at start, each with its fix:
+
+| Object | Needs |
+|--------|-------|
+| Server | At least `min_server_version`, `wal_level = logical`, a free slot and WAL sender |
+| Account | `REPLICATION` |
+| Database | Not `SQL_ASCII` |
+| Publication | Exists in the database; publishes insert, update, delete, truncate; `publish_via_partition_root = false` |
+| Table | In the publication with no row filter and no column list; a primary key; `REPLICA IDENTITY FULL` (each partition too); not `UNLOGGED`, temporary, or foreign |
+| Generated columns | None on 17; on 18, `publish_generated_columns = stored` |
+
+It warns when `max_slot_wal_keep_size` is unlimited, since a stopped consumer can then fill the disk, and when `idle_replication_slot_timeout` is under an hour.
+
+**From a standby:** `hot_standby_feedback = on`, and making a slot waits until `SELECT pg_log_standby_snapshot()` runs on the primary. A seed cut always runs on the primary.
+
+**A stopped stream holds WAL.** Drop a slot you no longer need. Starting after the slot was lost (`HistoryLost`) means seeding again.
 
 ## Production run (continuous)
 

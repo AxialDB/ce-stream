@@ -1,4 +1,5 @@
-# Example config. adapter = mysql (below) or mongo (see the commented block).
+# Example config. adapter = mysql (below), mongo (see the commented block), or
+# postgres (docs/ops-e2e.md).
 # Copy to ce-stream.toml (gitignored) and set password.
 #
 # Production: run without --max-events (continuous). Prefer a replica host.

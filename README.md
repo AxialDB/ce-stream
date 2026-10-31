@@ -2,11 +2,11 @@
 
 CloudEvents change streams from database logs.
 
-**Created and maintained by the [AxialDB](https://axialdb.com/) vendor** ([releases](https://github.com/AxialDB/releases)). Open-source under Apache-2.0 — not an AxialDB-only runtime; anyone can run it against MySQL 9.x or MongoDB 8.0+.
+**Created and maintained by the [AxialDB](https://axialdb.com/) vendor** ([releases](https://github.com/AxialDB/releases)). Open-source under Apache-2.0 — not an AxialDB-only runtime; anyone can run it against MySQL 9.x, MongoDB 8.0+, or PostgreSQL 17+.
 
 [![CI](https://github.com/AxialDB/ce-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/AxialDB/ce-stream/actions/workflows/ci.yml)
 
-**v1:** MySQL **9.x** ROW binlog and MongoDB **8.0+** change streams → CloudEvents 1.0 (JSON default; optional Avro). Kafka not required.  
+**Sources:** MySQL **9.x** ROW binlog, MongoDB **8.0+** change streams, and PostgreSQL **17+** logical replication ([#19](https://github.com/AxialDB/ce-stream/issues/19), not released) → CloudEvents 1.0 (JSON default; optional Avro). Kafka not required.  
 **Deferred:** other DB adapters — see [`docs/planning.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/planning.md). MongoDB shipped in [v0.4.0](https://github.com/AxialDB/ce-stream/blob/main/docs/releases/v0.4.0.md) ([#5](https://github.com/AxialDB/ce-stream/issues/5)).
 
 ## Quick start
@@ -45,6 +45,7 @@ Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (r
 | [`docs/ops-e2e.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/ops-e2e.md) | Ops / continuous run |
 | [`docs/delivery.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/delivery.md) | At-least-once, backpressure |
 | [`docs/library.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/library.md) | Embed as a library |
+| [`docs/values.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/values.md) | What a value of each host type looks like |
 | [`docs/avro.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/avro.md) | Optional Avro |
 | [`docs/perf-harness.md`](https://github.com/AxialDB/ce-stream/blob/main/docs/perf-harness.md) | Perf harness + lab results |
 | [`CONTRIBUTING.md`](https://github.com/AxialDB/ce-stream/blob/main/CONTRIBUTING.md) | Bugs, PRs, Discussions |
@@ -56,9 +57,9 @@ Prefer a **replica**. For real column names: MySQL `binlog_row_metadata=FULL` (r
 ## Pipeline
 
 ```text
-ChangeSource (mysql|mongo) → include-list → CloudEvent → Sink (stdout|http; json|avro)
+ChangeSource (mysql|mongo|postgres) → include-list → CloudEvent → Sink (stdout|http; json|avro)
                               ↑
-                         Checkpoint (GTID or resume token)
+                         Checkpoint (GTID, resume token, or LSN)
 ```
 
 ## License

@@ -64,6 +64,7 @@ cargo publish -p ce-stream-mysql-binlog
 cargo publish -p ce-stream-core
 cargo publish -p ce-stream-mysql
 cargo publish -p ce-stream-mongo
+cargo publish -p ce-stream-postgres
 cargo publish -p ce-stream-cli
 ```
 
