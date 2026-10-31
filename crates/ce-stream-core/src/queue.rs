@@ -13,6 +13,29 @@ use std::sync::{Condvar, Mutex};
 use crate::event::approx_json_bytes;
 use crate::transaction::CommittedTransaction;
 
+/// A source's tasks end with its future, which a consumer can drop at any await (a
+/// `select!`): a reader that went on would hold the connection, and a replication
+/// slot, until the process ends.
+pub struct ReaderTasks {
+    queue: std::sync::Arc<QueueBytes>,
+    tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl ReaderTasks {
+    pub fn new(queue: std::sync::Arc<QueueBytes>, tasks: Vec<tokio::task::AbortHandle>) -> Self {
+        Self { queue, tasks }
+    }
+}
+
+impl Drop for ReaderTasks {
+    fn drop(&mut self) {
+        self.queue.close();
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
 /// The row data of a delivery, as a part is measured.
 pub fn delivery_bytes(txn: &CommittedTransaction) -> u64 {
     txn.events

@@ -49,6 +49,22 @@ pub struct CatalogTable {
     pub partitions: Vec<CatalogPartition>,
 }
 
+/// `pg_publication_tables` lists the leaves of a partitioned table, and not the
+/// table: it is in the publication when its leaves are. One with no leaves has
+/// nothing to leave out.
+fn in_publication_sql(relation: &str, publication: &str) -> String {
+    format!(
+        "(NOT EXISTS (
+              SELECT 1 FROM pg_partition_tree({relation}) tree
+              JOIN pg_class leaf ON leaf.oid = tree.relid
+              JOIN pg_namespace leaf_n ON leaf_n.oid = leaf.relnamespace
+              WHERE tree.isleaf AND NOT EXISTS (
+                  SELECT 1 FROM pg_publication_tables t
+                  WHERE t.pubname = {publication}
+                    AND t.schemaname = leaf_n.nspname AND t.tablename = leaf.relname)))"
+    )
+}
+
 pub(crate) fn catalog_sql(oids: &[u32], publication: &str) -> String {
     let list = oids
         .iter()
@@ -56,6 +72,8 @@ pub(crate) fn catalog_sql(oids: &[u32], publication: &str) -> String {
         .collect::<Vec<_>>()
         .join(",");
     let publication = quote_literal(publication);
+    let in_c = in_publication_sql("c.oid", &publication);
+    let in_p = in_publication_sql("p.oid", &publication);
     format!(
         "SELECT json_build_object(
             'oid', c.oid::bigint, 'schema', n.nspname, 'name', c.relname,
@@ -68,10 +86,7 @@ pub(crate) fn catalog_sql(oids: &[u32], publication: &str) -> String {
                 CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
                 WHERE i.indrelid = c.oid AND i.indisprimary), '[]'::json),
-            'in_publication', EXISTS (
-                SELECT 1 FROM pg_publication_tables t
-                WHERE t.pubname = {publication}
-                  AND t.schemaname = n.nspname AND t.tablename = c.relname),
+            'in_publication', {in_c},
             'columns', COALESCE((
                 SELECT json_agg(json_build_object(
                     'name', a.attname, 'attnum', a.attnum, 'atttypid', a.atttypid::bigint,
@@ -82,10 +97,7 @@ pub(crate) fn catalog_sql(oids: &[u32], publication: &str) -> String {
                 SELECT json_agg(json_build_object(
                     'oid', p.oid::bigint, 'schema', pn.nspname, 'name', p.relname,
                     'relreplident', p.relreplident, 'relfilenode', p.relfilenode::bigint,
-                    'in_publication', EXISTS (
-                        SELECT 1 FROM pg_publication_tables t
-                        WHERE t.pubname = {publication}
-                          AND t.schemaname = pn.nspname AND t.tablename = p.relname),
+                    'in_publication', {in_p},
                     'inherits_xmin', (SELECT h.xmin::text FROM pg_inherits h WHERE h.inhrelid = p.oid),
                     'type_xmin', (SELECT y.xmin::text FROM pg_type y WHERE y.oid = p.reltype))
                     ORDER BY p.oid)

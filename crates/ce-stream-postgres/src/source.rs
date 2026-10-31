@@ -11,7 +11,7 @@ use ce_stream_core::error::{Error, Result};
 use ce_stream_core::event::{CloudEvent, TableRef};
 use ce_stream_core::gate::GateReport;
 use ce_stream_core::include::IncludeList;
-use ce_stream_core::queue::{delivery_bytes, QueueBytes};
+use ce_stream_core::queue::{delivery_bytes, QueueBytes, ReaderTasks};
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig, DEFAULT_QUEUE_MAX_BYTES};
 use ce_stream_core::transaction::SourcePosition;
 use ce_stream_core::{Checkpoint, CheckpointStore};
@@ -437,6 +437,10 @@ impl PostgresSource {
             }
             .run(),
         );
+        let _tasks = ReaderTasks::new(
+            Arc::clone(&queue),
+            vec![reader.abort_handle(), writer.abort_handle()],
+        );
 
         let on_confirm = self.config.checkpoint == CheckpointMode::OnConfirm;
         let server = (system_id.as_str(), timeline.as_str());
@@ -488,9 +492,6 @@ impl PostgresSource {
                 }
             }
         };
-        queue.close();
-        reader.abort();
-        writer.abort();
         result
     }
 

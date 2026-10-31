@@ -6,7 +6,7 @@ use ce_stream_core::error::{Error, Result};
 use ce_stream_core::event::{CloudEvent, PayloadMode};
 use ce_stream_core::gate::GateReport;
 use ce_stream_core::include::{IncludeFilter, IncludeList};
-use ce_stream_core::queue::{delivery_bytes, QueueBytes};
+use ce_stream_core::queue::{delivery_bytes, QueueBytes, ReaderTasks};
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig, DEFAULT_QUEUE_MAX_BYTES};
 use ce_stream_core::transaction::{ControlEvent, SourcePosition};
 use ce_stream_core::{Checkpoint, CheckpointStore};
@@ -222,6 +222,7 @@ impl MongoChangeStreamSource {
             tx,
         };
         let task = tokio::spawn(reader.run());
+        let _tasks = ReaderTasks::new(Arc::clone(&queue), vec![task.abort_handle()]);
 
         let on_confirm = self.config.checkpoint == CheckpointMode::OnConfirm;
         let mut confirmed = self.confirm.subscribe();
@@ -252,9 +253,8 @@ impl MongoChangeStreamSource {
                 Err(err) => break Err(err),
             }
         };
-        // A reader blocked on a full queue, or waiting for the server, ends here.
-        queue.close();
-        task.abort();
+        // A reader blocked on a full queue, or waiting for the server, ends with
+        // `_tasks`.
         result
     }
 
