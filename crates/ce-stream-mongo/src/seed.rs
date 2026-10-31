@@ -20,6 +20,35 @@ use crate::source::map_mongo;
 /// Documents per `getMore`. Large enough to cut round trips, small enough to bound memory.
 pub const SEED_BATCH: u32 = 512;
 
+/// The seed cut on MongoDB, on the consumer's client: a majority read at the
+/// cluster time holds everything before it, so there is nothing to wait for.
+pub struct MongoSeedCut {
+    pub client: Client,
+}
+
+#[async_trait::async_trait]
+impl ce_stream_core::SeedCut for MongoSeedCut {
+    async fn mark(&self) -> Result<ce_stream_core::SourcePosition> {
+        let time = note_cluster_time(&self.client).await?;
+        let payload = crate::checkpoint::MongoCheckpoint {
+            resume_token: serde_json::Value::Null,
+            cluster_time: Some(time),
+            seed_cluster_time: Some(time),
+        }
+        .to_checkpoint()
+        .payload;
+        Ok(ce_stream_core::SourcePosition {
+            adapter: crate::checkpoint::ADAPTER.into(),
+            at: payload.clone(),
+            after: payload,
+        })
+    }
+
+    async fn wait_settled(&self, _mark: &ce_stream_core::SourcePosition) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub async fn note_cluster_time(client: &Client) -> Result<ClusterTime> {
     let mut session = client.start_session().await.map_err(map_mongo)?;
     // `ping` rejects readConcern. A majority find is the smallest command that returns one.

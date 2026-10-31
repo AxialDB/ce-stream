@@ -1,7 +1,94 @@
 //! Interval-aware executed GTID set (checkpoint resume watermark).
 
+use ce_stream_core::delivery::has_resume_payload;
 use ce_stream_core::error::{Error, Result};
+use ce_stream_core::transaction::{CommittedTransaction, SourcePosition};
 use mysql_binlog_connector_rust::command::gtid_set::{GtidSet, Interval, UuidSet};
+
+/// The adapter id in a [`SourcePosition`].
+pub const ADAPTER: &str = "mysql";
+
+/// Where a commit sits: `at` its GTID, `after` the executed set after it. A
+/// part that is not the last has no set: `set_after` is empty, and `after` too.
+pub fn commit_position(gtid: &str, set_after: &str) -> SourcePosition {
+    let after = if set_after.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({ "gtid": set_after })
+    };
+    SourcePosition {
+        adapter: ADAPTER.into(),
+        at: serde_json::json!({ "gtid": gtid }),
+        after,
+    }
+}
+
+/// The GTID of a commit from this adapter; empty when it carries no position.
+pub fn commit_gtid(txn: &CommittedTransaction) -> &str {
+    txn.position
+        .as_ref()
+        .and_then(|position| position.at.get("gtid"))
+        .and_then(|gtid| gtid.as_str())
+        .unwrap_or("")
+}
+
+/// The executed set after a commit from this adapter; empty on a part that is
+/// not the last.
+pub fn commit_gtid_set_after(txn: &CommittedTransaction) -> &str {
+    txn.position
+        .as_ref()
+        .and_then(|position| position.after.get("gtid"))
+        .and_then(|set| set.as_str())
+        .unwrap_or("")
+}
+
+/// See [`ce_stream_core::ChangeSource::covers`]: every GTID `target` names is
+/// in the executed set of `at`. GTIDs of servers `target` does not name do not
+/// matter.
+pub fn covers_position(at: &SourcePosition, target: &SourcePosition) -> Result<bool> {
+    for position in [at, target] {
+        if position.adapter != ADAPTER {
+            return Err(Error::Source(format!(
+                "covers: a {} position on a mysql source",
+                position.adapter
+            )));
+        }
+    }
+    if !has_resume_payload(at) {
+        return Err(Error::Source(
+            "covers: a part that is not the last has no position after it".into(),
+        ));
+    }
+    let executed = at.after.get("gtid").and_then(|v| v.as_str()).unwrap_or("");
+    let wanted = target.at.get("gtid").and_then(|v| v.as_str());
+    let Some(wanted) = wanted else {
+        return Err(Error::Source("covers: target has no gtid".into()));
+    };
+    set_contains(executed, wanted)
+}
+
+fn set_contains(executed: &str, wanted: &str) -> Result<bool> {
+    let parse =
+        |s: &str| GtidSet::new(s).map_err(|e| Error::Source(format!("gtid set parse: {e}")));
+    let executed = parse(executed)?;
+    for uuid_set in parse(wanted)?.get_uuid_sets() {
+        let have = executed
+            .get_uuid_sets()
+            .into_iter()
+            .find(|have| have.uuid.eq_ignore_ascii_case(&uuid_set.uuid));
+        let have = have.map(|have| merge_intervals(have.intervals.clone()));
+        let have = have.unwrap_or_default();
+        for interval in &uuid_set.intervals {
+            if !have
+                .iter()
+                .any(|h| h.start <= interval.start && interval.end <= h.end)
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
 
 /// Durable executed GTID set loaded from / saved to checkpoint.
 #[derive(Debug)]
@@ -128,6 +215,59 @@ fn merge_intervals(mut intervals: Vec<Interval>) -> Vec<Interval> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_position(set: &str) -> SourcePosition {
+        SourcePosition {
+            adapter: ADAPTER.into(),
+            at: serde_json::json!({ "gtid": set }),
+            after: serde_json::json!({ "gtid": set }),
+        }
+    }
+
+    #[test]
+    fn covers_is_set_inclusion() {
+        let at = set_position("abc:1-10:12-15");
+        assert!(covers_position(&at, &set_position("abc:3-5")).unwrap());
+        assert!(covers_position(&at, &set_position("abc:12")).unwrap());
+        assert!(!covers_position(&at, &set_position("abc:11")).unwrap());
+        assert!(!covers_position(&at, &set_position("abc:9-13")).unwrap());
+    }
+
+    #[test]
+    fn covers_looks_only_at_the_servers_the_target_names() {
+        let at = set_position("abc:1-10,def:1-3");
+        assert!(covers_position(&at, &set_position("def:2")).unwrap());
+        assert!(!covers_position(&at, &set_position("xyz:1")).unwrap());
+        assert!(covers_position(&set_position("abc:1-5,def:9"), &set_position("abc:2")).unwrap());
+    }
+
+    #[test]
+    fn covers_on_a_part_that_is_not_the_last_is_an_error() {
+        let part = commit_position("abc:5", "");
+        assert!(covers_position(&part, &set_position("abc:1")).is_err());
+    }
+
+    #[test]
+    fn covers_refuses_another_adapters_position() {
+        let mut other = set_position("abc:1");
+        other.adapter = "mongo".into();
+        assert!(covers_position(&other, &set_position("abc:1")).is_err());
+    }
+
+    #[test]
+    fn a_commit_position_says_its_gtid_and_the_set_after() {
+        let txn = CommittedTransaction {
+            position: Some(commit_position("abc:5", "abc:1-5")),
+            ..Default::default()
+        };
+        assert_eq!(commit_gtid(&txn), "abc:5");
+        assert_eq!(commit_gtid_set_after(&txn), "abc:1-5");
+        let part = CommittedTransaction {
+            position: Some(commit_position("abc:5", "")),
+            ..Default::default()
+        };
+        assert_eq!(commit_gtid_set_after(&part), "");
+    }
 
     #[test]
     fn round_trip_preserves_holes() {

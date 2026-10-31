@@ -9,9 +9,11 @@ use ce_stream_core::avro_encode;
 use ce_stream_core::error::Result;
 use ce_stream_core::event::{ChangeOp, PayloadMode, TableRef};
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement};
+use ce_stream_core::IncludeList;
 use ce_stream_core::{Checkpoint, CheckpointStore, CloudEvent, DeliveryUnit};
-use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
-use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, IncludeList, TxnBuffer};
+use ce_stream_mysql::test_support::{commit_of, dispatch, BinlogDispatchCtx};
+use ce_stream_mysql::{commit_gtid, commit_position};
+use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -51,8 +53,7 @@ fn row_event() -> CloudEvent {
 fn make_txn(gtid: &str, rows: usize) -> CommittedTransaction {
     CommittedTransaction {
         part: None,
-        gtid: gtid.into(),
-        gtid_set_after: format!("{gtid}"),
+        position: Some(commit_position(gtid, gtid)),
         ddl: vec![],
         events: (0..rows).map(|_| row_event()).collect(),
         ..Default::default()
@@ -132,8 +133,8 @@ fn dispatch_no_commit_before_xid() {
     assert!(rx.try_recv().is_err(), "still no commit before XID");
 
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
-    let commit = rx.try_recv().unwrap().expect("commit at XID");
-    assert_eq!(commit.gtid, "uuid:1");
+    let commit = commit_of(rx.try_recv().unwrap().expect("commit at XID"));
+    assert_eq!(commit_gtid(&commit), "uuid:1");
     assert_eq!(commit.events.len(), 3);
 }
 
@@ -167,7 +168,7 @@ fn dispatch_three_row_callbacks_after_xid_in_row_mode() {
     dispatch(&mut ctx, EventData::WriteRows(demo_write_rows(3))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 2 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     let delivered = Cell::new(0u32);
     let mut executed = ExecutedSet::default();
     let mut checkpoint_store = None;
@@ -228,10 +229,10 @@ fn all_filtered_txn_produces_empty_commit_at_xid() {
     dispatch(&mut ctx, EventData::WriteRows(demo_write_rows(2))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 3 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert!(commit.events.is_empty());
     assert!(commit.ddl.is_empty());
-    assert_eq!(commit.gtid, "uuid:3");
+    assert_eq!(commit_gtid(&commit), "uuid:3");
 }
 
 #[test]
@@ -303,7 +304,7 @@ fn dispatch_ddl_populated_in_commit() {
     dispatch(&mut ctx, EventData::WriteRows(demo_write_rows(1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 5 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(commit.ddl.len(), 1);
     assert_eq!(commit.ddl[0].schema, "demo");
     assert_eq!(commit.events.len(), 1);
@@ -408,7 +409,7 @@ async fn transaction_mode_one_envelope_per_commit() {
     .unwrap();
 
     let txn = received.expect("one envelope");
-    assert_eq!(txn.gtid, "abc:1");
+    assert_eq!(commit_gtid(&txn), "abc:1");
     assert_eq!(txn.events.len(), 3);
 }
 
@@ -426,8 +427,7 @@ async fn ddl_in_commit_row_mode() {
     deliver_committed(
         CommittedTransaction {
             part: None,
-            gtid: "abc:1".into(),
-            gtid_set_after: "abc:1-1".into(),
+            position: Some(commit_position("abc:1", "abc:1-1")),
             ddl: vec![DdlStatement {
                 schema: "app".into(),
                 query: "ALTER TABLE t ADD COLUMN x INT".into(),
@@ -507,8 +507,7 @@ async fn empty_commit_still_advances_watermark() {
     deliver_committed(
         CommittedTransaction {
             part: None,
-            gtid: "abc:1".into(),
-            gtid_set_after: "abc:1-1".into(),
+            position: Some(commit_position("abc:1", "abc:1-1")),
             ddl: vec![],
             events: vec![],
             ..Default::default()
@@ -560,7 +559,7 @@ fn all_filtered_commit_still_checkpoints() {
     dispatch(&mut ctx, EventData::WriteRows(demo_write_rows(2))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 4 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
 
     let saves = Arc::new(Mutex::new(0u32));
     let store = MemStore {

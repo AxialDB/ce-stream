@@ -6,8 +6,8 @@ use ce_stream_core::source::{DEFAULT_PART_MAX_BYTES, DEFAULT_PART_MAX_ROWS};
 use ce_stream_core::transaction::{CommittedTransaction, DdlStatement, TransactionPart};
 use ce_stream_core::CloudEvent;
 
-use crate::gtid::ExecutedSet;
-use crate::queue::{delivery_bytes, QueueBytes};
+use crate::gtid::{commit_position, ExecutedSet};
+use ce_stream_core::queue::{delivery_bytes, QueueBytes};
 use std::sync::Arc;
 
 /// Buffers DDL + row CloudEvents until the transaction ends, or until they
@@ -193,9 +193,7 @@ impl TxnBuffer {
             event.extensions.remove("gtidset");
         }
         Some(CommittedTransaction {
-            gtid,
-            gtid_set_after: String::new(),
-            position: None,
+            position: Some(commit_position(&gtid, "")),
             ddl: std::mem::take(&mut self.ddl),
             control: Vec::new(),
             events,
@@ -222,9 +220,7 @@ impl TxnBuffer {
         self.part_bytes = 0;
         Some(CommittedTransaction {
             part,
-            gtid,
-            gtid_set_after,
-            position: None,
+            position: Some(commit_position(&gtid, &gtid_set_after)),
             ddl: std::mem::take(&mut self.ddl),
             control: Vec::new(),
             events: std::mem::take(&mut self.events),
@@ -235,6 +231,7 @@ impl TxnBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtid::{commit_gtid, commit_gtid_set_after};
     use ce_stream_core::event::{ChangeOp, TableRef};
 
     fn sample_row() -> CloudEvent {
@@ -256,7 +253,7 @@ mod tests {
         assert_eq!(buf.events.len(), 2);
 
         let txn = buf.take_commit("uuid:1-1".into()).expect("commit");
-        assert_eq!(txn.gtid, "uuid:1");
+        assert_eq!(commit_gtid(&txn), "uuid:1");
         assert_eq!(txn.events.len(), 2);
         assert!(buf.pending_gtid().is_none());
         assert!(buf.events.is_empty());
@@ -289,8 +286,12 @@ mod tests {
         let last = buf.take_commit("uuid:1-1".into()).expect("commit");
         assert_eq!(parts.len(), 2);
         for (i, part) in parts.iter().enumerate() {
-            assert_eq!(part.gtid, "uuid:1");
-            assert_eq!(part.gtid_set_after, "", "a part carries no position");
+            assert_eq!(commit_gtid(part), "uuid:1");
+            assert_eq!(
+                commit_gtid_set_after(part),
+                "",
+                "a part carries no position"
+            );
             assert_eq!(part.events.len(), 2);
             assert_eq!(
                 part.part,
@@ -306,7 +307,7 @@ mod tests {
                 .all(|e| !e.extensions.contains_key("gtidset")));
         }
         assert_eq!(last.events.len(), 1);
-        assert_eq!(last.gtid_set_after, "uuid:1-1");
+        assert_eq!(commit_gtid_set_after(&last), "uuid:1-1");
         assert_eq!(
             last.part,
             Some(TransactionPart {

@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use ce_stream_core::event::PayloadMode;
 use ce_stream_core::DeliveryUnit;
-use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
+use ce_stream_core::IncludeList;
+use ce_stream_mysql::test_support::{commit_of, dispatch, BinlogDispatchCtx};
 use ce_stream_mysql::DDL_CE_TYPE;
-use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, IncludeList, TxnBuffer};
+use ce_stream_mysql::{deliver_committed, DeliverCtx, ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -85,7 +86,7 @@ fn ddl_buffered_then_commit_includes_ddl_and_rows() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(3))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(commit.ddl.len(), 1);
     assert_eq!(commit.ddl[0].schema, "demo");
     assert_eq!(commit.events.len(), 3);
@@ -134,7 +135,7 @@ fn row_mode_one_ddl_ce_then_three_row_ces() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(3))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     let mut types = Vec::new();
     let mut executed = ExecutedSet::default();
     let mut checkpoint_store = None;
@@ -206,6 +207,6 @@ fn begin_query_is_ignored() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert!(commit.ddl.is_empty());
 }

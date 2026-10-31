@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ce_stream_core::delivery::Delivery;
 use ce_stream_core::event::{approx_json_bytes, ChangeOp, CloudEvent, PayloadMode, TableRef};
-use ce_stream_core::transaction::CommittedTransaction;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::table_map_event::TableMapEvent;
 use tokio::sync::{mpsc, Mutex};
@@ -31,7 +31,7 @@ pub struct BinlogDispatchCtx<'a> {
     pub source_id: &'a str,
     pub include: &'a IncludeList,
     pub payload_mode: PayloadMode,
-    pub tx: &'a mpsc::Sender<std::result::Result<CommittedTransaction, String>>,
+    pub tx: &'a mpsc::Sender<std::result::Result<Delivery, String>>,
 }
 
 /// Route one binlog event through the commit-boundary state machine.
@@ -186,9 +186,21 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
         return Err("XID without pending GTID".into());
     };
 
-    ctx.txn.reserve_queue(&commit)?;
+    // A transaction with nothing for the consumer still moves the position: a
+    // consumer waiting for one (a seed's target) sees the stream pass it.
+    let nothing_in_it = commit.part.is_none()
+        && commit.events.is_empty()
+        && commit.ddl.is_empty()
+        && commit.control.is_empty();
+    let delivery = match commit.position.clone().filter(|_| nothing_in_it) {
+        Some(position) => Delivery::Progress { position },
+        None => {
+            ctx.txn.reserve_queue(&commit)?;
+            Delivery::Commit(commit)
+        }
+    };
     ctx.tx
-        .blocking_send(Ok(commit))
+        .blocking_send(Ok(delivery))
         .map_err(|_| "event channel closed".to_string())
 }
 
@@ -311,7 +323,7 @@ where
             if let Some(part) = ctx.txn.take_part() {
                 ctx.txn.reserve_queue(&part)?;
                 ctx.tx
-                    .blocking_send(Ok(part))
+                    .blocking_send(Ok(Delivery::Commit(part)))
                     .map_err(|_| "event channel closed".to_string())?;
             }
         }

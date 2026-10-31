@@ -23,38 +23,75 @@ pub struct SourcePosition {
     pub after: serde_json::Value,
 }
 
-/// Lifecycle change to a source table or collection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Lifecycle change to a source table or collection. The consumer decides what
+/// stops its own work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ControlKind {
     Dropped,
-    Renamed,
+    Renamed {
+        /// v0.5 wrote this as `renamed_to`, beside the kind.
+        #[serde(alias = "renamed_to")]
+        to: TableRef,
+    },
+    /// All rows of the subject are gone as of this commit.
+    Truncated,
+    /// The subject's columns differ from its last [`crate::TableSchema`].
+    DefinitionChanged,
     DatabaseDropped,
     /// The source can no longer deliver changes for `subject` on this session.
     Invalidated,
+    /// A message the consumer wrote into the source's log inside a
+    /// transaction, delivered at its position under its prefix.
+    Message {
+        prefix: String,
+        #[serde(with = "base64_bytes")]
+        content: Vec<u8>,
+    },
+}
+
+mod base64_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ControlKind {
     pub fn as_ce_type(&self) -> &'static str {
         match self {
             Self::Dropped => "io.ce-stream.control.dropped",
-            Self::Renamed => "io.ce-stream.control.renamed",
+            Self::Renamed { .. } => "io.ce-stream.control.renamed",
+            Self::Truncated => "io.ce-stream.control.truncated",
+            Self::DefinitionChanged => "io.ce-stream.control.definition_changed",
             Self::DatabaseDropped => "io.ce-stream.control.database_dropped",
             Self::Invalidated => "io.ce-stream.control.invalidated",
+            Self::Message { .. } => "io.ce-stream.control.message",
         }
     }
 }
 
-/// Typed lifecycle event for sources without SQL DDL text. MySQL reports DDL
-/// through [`DdlStatement`] instead.
+/// Typed lifecycle event, on every adapter. A host with SQL DDL text also has
+/// it in [`DdlStatement`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlEvent {
+    #[serde(flatten)]
     pub kind: ControlKind,
     /// Affected object. `table` is empty for [`ControlKind::DatabaseDropped`].
     pub subject: TableRef,
-    /// New name for [`ControlKind::Renamed`].
+    /// The table's host identity, where it has one that survives a rename.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub renamed_to: Option<TableRef>,
+    pub identity: Option<String>,
 }
 
 impl ControlEvent {
@@ -86,10 +123,11 @@ impl ControlEvent {
 ///
 /// A transaction larger than one part (see [`crate::SourceConfig::part_max_rows`]
 /// and [`crate::SourceConfig::part_max_bytes`]) is delivered as several
-/// [`CommittedTransaction`] values with the same GTID, numbered from 1, in
-/// order and with nothing between them. Only the last one ends the
-/// transaction: it alone carries the position after it and moves the
-/// checkpoint. A part that is not the last is not a commit.
+/// [`CommittedTransaction`] values with the same `at`, numbered from 1, in
+/// order. Only a [`crate::TableSchema`] may come between them. Only the last
+/// one ends the transaction: it alone carries the position after it and the
+/// transaction's control events, and moves the checkpoint. A part that is not
+/// the last is not a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionPart {
     /// 1 for the first part.
@@ -100,23 +138,16 @@ pub struct TransactionPart {
 
 /// One committed source transaction — primary delivery unit when `delivery_unit = transaction`.
 ///
-/// MySQL fills `gtid` / `gtid_set_after` and leaves `position` and `control`
-/// empty, so its JSON and Avro output match v0.3. Other adapters leave the GTID
-/// fields empty and set `position`. Use [`Self::source_position`] for either.
+/// A transaction's rows are delivered when it commits, on every adapter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommittedTransaction {
-    /// MySQL: GTID of this commit, e.g. `3e11fa47-71ca-11e1-9e33-c080020c9a66:1`.
-    #[serde(default)]
-    pub gtid: String,
-    /// MySQL: executed GTID set **after** this transaction commits (for checkpoint resume).
-    #[serde(default)]
-    pub gtid_set_after: String,
-    /// Non-MySQL adapters: position of this commit.
+    /// Where this commit sits. Every adapter sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<SourcePosition>,
     /// DDL in binlog order, before row events.
+    #[serde(default)]
     pub ddl: Vec<DdlStatement>,
-    /// Lifecycle events, after row events. Empty for MySQL.
+    /// Lifecycle events; a consumer reads them all before it applies the rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control: Vec<ControlEvent>,
     /// Row change events in source order.
@@ -134,57 +165,11 @@ impl CommittedTransaction {
     pub fn ends_transaction(&self) -> bool {
         self.part.map_or(true, |part| part.last)
     }
-
-    /// Adapter-neutral position. MySQL commits derive it from the GTID fields:
-    /// `at = {"gtid": gtid}`, `after = {"gtid": gtid_set_after}`.
-    pub fn source_position(&self) -> SourcePosition {
-        self.position.clone().unwrap_or_else(|| SourcePosition {
-            adapter: "mysql".into(),
-            at: serde_json::json!({ "gtid": self.gtid }),
-            after: serde_json::json!({ "gtid": self.gtid_set_after }),
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mysql_txn() -> CommittedTransaction {
-        CommittedTransaction {
-            part: None,
-            gtid: "sid:5".into(),
-            gtid_set_after: "sid:1-5".into(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn mysql_json_matches_v03() {
-        assert_eq!(
-            serde_json::to_string(&mysql_txn()).unwrap(),
-            r#"{"gtid":"sid:5","gtid_set_after":"sid:1-5","ddl":[],"events":[]}"#
-        );
-    }
-
-    #[test]
-    fn mysql_position_is_derived_from_gtid() {
-        let pos = mysql_txn().source_position();
-        assert_eq!(pos.adapter, "mysql");
-        assert_eq!(pos.at["gtid"], "sid:5");
-        assert_eq!(pos.after["gtid"], "sid:1-5");
-    }
-
-    #[test]
-    fn v03_json_still_decodes() {
-        let txn: CommittedTransaction = serde_json::from_str(
-            r#"{"gtid":"sid:2","gtid_set_after":"sid:1-2","ddl":[],"events":[]}"#,
-        )
-        .unwrap();
-        assert!(txn.position.is_none());
-        assert!(txn.control.is_empty());
-        assert_eq!(txn.source_position().after["gtid"], "sid:1-2");
-    }
 
     #[test]
     fn adapter_position_roundtrips() {
@@ -196,17 +181,53 @@ mod tests {
                 after: serde_json::json!({ "resume_token": "82AB" }),
             }),
             control: vec![ControlEvent {
-                kind: ControlKind::Renamed,
+                kind: ControlKind::Renamed {
+                    to: TableRef::new("app", "orders_old"),
+                },
                 subject: TableRef::new("app", "orders"),
-                renamed_to: Some(TableRef::new("app", "orders_old")),
+                identity: None,
             }],
             ..Default::default()
         };
         let back: CommittedTransaction =
             serde_json::from_str(&serde_json::to_string(&txn).unwrap()).unwrap();
-        assert_eq!(back.source_position(), txn.source_position());
+        assert_eq!(back.position, txn.position);
         assert_eq!(back.control, txn.control);
-        assert!(back.gtid.is_empty());
+    }
+
+    #[test]
+    fn a_v05_control_event_still_decodes() {
+        let back: ControlEvent = serde_json::from_str(
+            r#"{"kind":"renamed","subject":{"database":"a","table":"t"},"renamed_to":{"database":"a","table":"u"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            back.kind,
+            ControlKind::Renamed {
+                to: TableRef::new("a", "u")
+            }
+        );
+        let back: ControlEvent =
+            serde_json::from_str(r#"{"kind":"dropped","subject":{"database":"a","table":"t"}}"#)
+                .unwrap();
+        assert_eq!(back.kind, ControlKind::Dropped);
+    }
+
+    #[test]
+    fn a_message_control_keeps_its_bytes() {
+        let event = ControlEvent {
+            kind: ControlKind::Message {
+                prefix: "axialdb_ddl".into(),
+                content: vec![0, 255, 7],
+            },
+            subject: TableRef::new("", ""),
+            identity: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"], "message");
+        assert_eq!(json["content"], "AP8H");
+        let back: ControlEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, event);
     }
 
     #[test]
@@ -214,7 +235,7 @@ mod tests {
         let ev = ControlEvent {
             kind: ControlKind::DatabaseDropped,
             subject: TableRef::new("app", ""),
-            renamed_to: None,
+            identity: None,
         }
         .to_cloud_event("mongo://test", serde_json::Map::new());
         assert_eq!(ev.ty, "io.ce-stream.control.database_dropped");

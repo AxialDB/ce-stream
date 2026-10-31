@@ -2,15 +2,12 @@
 
 use ce_stream_core::error::{Error, Result};
 use ce_stream_core::event::TableRef;
+use ce_stream_core::gate::GateReport;
 use futures_util::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::Client;
 
 use crate::options::FullDocumentMode;
-
-pub struct GateReport {
-    pub warnings: Vec<String>,
-}
 
 pub fn topology_ok(hello: &Document) -> Result<()> {
     if hello.get_str("msg").ok() == Some("isdbgrid") {
@@ -114,13 +111,15 @@ pub async fn validate_capture_gates(
     watched: &[TableRef],
     mode: FullDocumentMode,
 ) -> Result<GateReport> {
-    let mut warnings = Vec::new();
+    let mut report = GateReport::default();
     let hello = client
         .database("admin")
         .run_command(doc! { "hello": 1 })
         .await
         .map_err(|e| Error::Source(format!("hello: {e}")))?;
-    topology_ok(&hello)?;
+    if let Err(err) = topology_ok(&hello) {
+        report.fail("server", err.to_string(), None);
+    }
 
     let info = client
         .database("admin")
@@ -130,14 +129,18 @@ pub async fn validate_capture_gates(
     let version = info
         .get_str("version")
         .map_err(|_| Error::Source("buildInfo has no version".into()))?;
-    version_ok(version)?;
+    if let Err(err) = version_ok(version) {
+        report.fail("server", err.to_string(), None);
+    }
 
     let status = client
         .database("admin")
         .run_command(doc! { "connectionStatus": 1, "showPrivileges": true })
         .await
         .map_err(|e| Error::Source(format!("connectionStatus: {e}")))?;
-    privileges_ok(&status, db)?;
+    if let Err(err) = privileges_ok(&status, db) {
+        report.fail(format!("database {db}"), err.to_string(), None);
+    }
 
     if mode == FullDocumentMode::Required {
         for table in watched.iter().filter(|t| t.database == db) {
@@ -147,21 +150,24 @@ pub async fn validate_capture_gates(
                 .filter(doc! { "name": &table.table })
                 .await
                 .map_err(|e| Error::Source(format!("listCollections: {e}")))?;
+            let object = format!("{db}.{}", table.table);
             let info = cursor
                 .next()
                 .await
                 .transpose()
-                .map_err(|e| Error::Source(format!("listCollections: {e}")))?
-                .ok_or_else(|| {
-                    Error::Source(format!("collection {db}.{} does not exist", table.table))
-                })?;
+                .map_err(|e| Error::Source(format!("listCollections: {e}")))?;
+            let Some(info) = info else {
+                report.fail(object, "does not exist", None);
+                continue;
+            };
             let options_doc = mongodb::bson::to_document(&info.options).unwrap_or_default();
             let wrapped = doc! { "options": options_doc };
             if !post_images_enabled(&wrapped) {
-                return Err(Error::Source(format!(
-                    "enable changeStreamPreAndPostImages on {db}.{} or use update_lookup",
-                    table.table
-                )));
+                report.fail(
+                    object,
+                    "no post-images",
+                    Some("enable changeStreamPreAndPostImages, or use update_lookup"),
+                );
             }
         }
     }
@@ -169,11 +175,11 @@ pub async fn validate_capture_gates(
     match oplog_bounds(client).await {
         Ok((oldest, newest)) => {
             let secs = oplog_window_secs(oldest, newest);
-            warnings.push(format!("oplog window is {secs}s"));
+            report.warn("oplog", format!("window is {secs}s"), None);
         }
-        Err(msg) => warnings.push(msg),
+        Err(msg) => report.warn("oplog", msg, None),
     }
-    Ok(GateReport { warnings })
+    Ok(report)
 }
 
 async fn oplog_bounds(client: &Client) -> std::result::Result<(u32, u32), String> {

@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ce_stream_core::event::PayloadMode;
-use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx, TableMap};
-use ce_stream_mysql::{ExecutedSet, IncludeList, TxnBuffer};
+use ce_stream_core::IncludeList;
+use ce_stream_mysql::commit_gtid;
+use ce_stream_mysql::test_support::{commit_of, dispatch, BinlogDispatchCtx, TableMap};
+use ce_stream_mysql::{ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::event_header::EventHeader;
@@ -97,11 +99,15 @@ fn transaction_payload_unpack_produces_one_commit() {
 
     dispatch(&mut ctx, compressed_txn_payload(3)).expect("transaction payload");
 
-    let commit = rx
-        .try_recv()
-        .expect("one commit at inner XID")
-        .expect("commit ok");
-    assert_eq!(commit.gtid, "36682cf3-a048-11ed-b4b3-0242ac110004:1");
+    let commit = commit_of(
+        rx.try_recv()
+            .expect("one commit at inner XID")
+            .expect("commit ok"),
+    );
+    assert_eq!(
+        commit_gtid(&commit),
+        "36682cf3-a048-11ed-b4b3-0242ac110004:1"
+    );
     assert_eq!(commit.events.len(), 3);
     assert!(rx.try_recv().is_err());
 }
@@ -169,7 +175,7 @@ fn transaction_payload_includes_ddl_query() {
     )
     .unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(commit.ddl.len(), 1);
     assert_eq!(commit.events.len(), 2);
 }

@@ -1,10 +1,44 @@
 //! Mongo checkpoint payload. `after` is what a restart passes to `resume_after`.
 
+use ce_stream_core::delivery::has_resume_payload;
+use ce_stream_core::error::{Error, Result};
+use ce_stream_core::transaction::SourcePosition;
 use ce_stream_core::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const ADAPTER: &str = "mongo";
+
+/// The cluster time in a position's `at` or `after`: its own, or its token's.
+fn cluster_time_of(payload: &Value) -> Option<ClusterTime> {
+    payload
+        .get("cluster_time")
+        .and_then(|time| serde_json::from_value(time.clone()).ok())
+        .or_else(|| ClusterTime::of_resume_token(payload.get("resume_token")?))
+}
+
+/// See [`ce_stream_core::ChangeSource::covers`]: the cluster time of `target`
+/// is at or before the cluster time the stream has passed.
+pub fn covers_position(at: &SourcePosition, target: &SourcePosition) -> Result<bool> {
+    for position in [at, target] {
+        if position.adapter != ADAPTER {
+            return Err(Error::Source(format!(
+                "covers: a {} position on a mongo source",
+                position.adapter
+            )));
+        }
+    }
+    if !has_resume_payload(at) {
+        return Err(Error::Source(
+            "covers: a part that is not the last has no position after it".into(),
+        ));
+    }
+    let passed = cluster_time_of(&at.after)
+        .ok_or_else(|| Error::Source("covers: position has no cluster time".into()))?;
+    let wanted = cluster_time_of(&target.at)
+        .ok_or_else(|| Error::Source("covers: target has no cluster time".into()))?;
+    Ok((wanted.t, wanted.i) <= (passed.t, passed.i))
+}
 
 /// oplog cluster time, seconds plus increment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +131,39 @@ mod tests {
             None
         );
         assert_eq!(ClusterTime::of_resume_token(&json!({})), None);
+    }
+
+    fn position(t: u32, i: u32) -> SourcePosition {
+        let payload = json!({ "resume_token": null, "cluster_time": { "t": t, "i": i } });
+        SourcePosition {
+            adapter: ADAPTER.into(),
+            at: payload.clone(),
+            after: payload,
+        }
+    }
+
+    #[test]
+    fn covers_compares_cluster_times() {
+        assert!(covers_position(&position(5, 2), &position(5, 2)).unwrap());
+        assert!(covers_position(&position(5, 2), &position(5, 1)).unwrap());
+        assert!(covers_position(&position(6, 0), &position(5, 9)).unwrap());
+        assert!(!covers_position(&position(5, 2), &position(5, 3)).unwrap());
+    }
+
+    #[test]
+    fn covers_reads_the_token_of_an_idle_position() {
+        let mut idle = position(0, 0);
+        idle.after =
+            json!({ "resume_token": { "_data": "826AC91BAF000000042B042C0100296E5A1004" } });
+        assert!(covers_position(&idle, &position(0x6AC9_1BAF, 4)).unwrap());
+        assert!(!covers_position(&idle, &position(0x6AC9_1BAF, 5)).unwrap());
+    }
+
+    #[test]
+    fn covers_on_a_part_that_is_not_the_last_is_an_error() {
+        let mut part = position(5, 1);
+        part.after = json!({});
+        assert!(covers_position(&part, &position(1, 1)).is_err());
     }
 
     #[test]

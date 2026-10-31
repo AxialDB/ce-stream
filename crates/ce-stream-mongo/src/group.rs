@@ -277,14 +277,14 @@ fn filter_effect(effect: Effect, filter: &IncludeFilter) -> Effect {
             }
         }
         Effect::Control(ev) => match ev.kind {
-            ControlKind::Dropped | ControlKind::Renamed => {
+            ControlKind::Dropped | ControlKind::Renamed { .. } => {
                 if ev.subject.table.is_empty() || filter.row_allowed(&ev.subject.as_subject()) {
                     Effect::Control(ev)
                 } else {
                     Effect::Filtered
                 }
             }
-            ControlKind::DatabaseDropped | ControlKind::Invalidated => Effect::Control(ev),
+            _ => Effect::Control(ev),
         },
         Effect::Filtered => Effect::Filtered,
     }
@@ -405,7 +405,6 @@ mod tests {
         let out = g.push(raw(ChangeOpKind::Insert, "a", None, "orders"), &orders());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].txn.events.len(), 1);
-        assert!(out[0].txn.gtid.is_empty());
     }
 
     #[test]

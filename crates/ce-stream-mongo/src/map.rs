@@ -61,23 +61,23 @@ pub fn map_change(raw: RawChange, source_id: &str, mode: PayloadMode) -> Incomin
             row_effect(&raw, source_id, mode)
         }
         ChangeOpKind::Delete => delete_effect(&raw, source_id, mode),
-        ChangeOpKind::Drop => control_effect(&raw, ControlKind::Dropped, None),
+        ChangeOpKind::Drop => control_effect(&raw, ControlKind::Dropped),
         ChangeOpKind::Rename => {
             let to = TableRef::new(
                 raw.to_db.clone().unwrap_or_else(|| raw.db.clone()),
                 raw.to_coll.clone().unwrap_or_default(),
             );
-            control_effect(&raw, ControlKind::Renamed, Some(to))
+            control_effect(&raw, ControlKind::Renamed { to })
         }
         ChangeOpKind::DropDatabase => Effect::Control(ControlEvent {
             kind: ControlKind::DatabaseDropped,
             subject: TableRef::new(&raw.db, ""),
-            renamed_to: None,
+            identity: None,
         }),
         ChangeOpKind::Invalidate => Effect::Control(ControlEvent {
             kind: ControlKind::Invalidated,
             subject: TableRef::new(&raw.db, raw.coll.clone().unwrap_or_default()),
-            renamed_to: None,
+            identity: None,
         }),
         ChangeOpKind::Other => Effect::Filtered,
     };
@@ -144,14 +144,14 @@ fn delete_effect(raw: &RawChange, source_id: &str, mode: PayloadMode) -> Effect 
     ))
 }
 
-fn control_effect(raw: &RawChange, kind: ControlKind, renamed_to: Option<TableRef>) -> Effect {
+fn control_effect(raw: &RawChange, kind: ControlKind) -> Effect {
     let Some(coll) = raw.coll.clone() else {
         return Effect::Filtered;
     };
     Effect::Control(ControlEvent {
         kind,
         subject: TableRef::new(&raw.db, coll),
-        renamed_to,
+        identity: None,
     })
 }
 
@@ -226,8 +226,12 @@ mod tests {
         let Effect::Control(c) = mapped.effect else {
             panic!("control")
         };
-        assert_eq!(c.kind, ControlKind::Renamed);
-        assert_eq!(c.renamed_to.unwrap().table, "orders_old");
+        assert_eq!(
+            c.kind,
+            ControlKind::Renamed {
+                to: TableRef::new("app", "orders_old")
+            }
+        );
 
         let mut drop_db = base(ChangeOpKind::DropDatabase);
         drop_db.coll = None;

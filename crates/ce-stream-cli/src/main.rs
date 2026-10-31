@@ -3,15 +3,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use ce_stream_core::delivery::Delivery;
 use ce_stream_core::event::{CloudEvent, PayloadMode, SinkFormat, TableRef};
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
 use ce_stream_core::transaction::{CommittedTransaction, SourcePosition};
-use ce_stream_core::{CheckpointStore, HttpSink, Sink, StdoutSink};
+use ce_stream_core::{CheckpointStore, FileCheckpointStore, HttpSink, Sink, StdoutSink};
 use ce_stream_mongo::{
     note_cluster_time, open_seed_cursor, read_seed_batch, FullDocumentMode,
     MongoChangeStreamSource, MongoCheckpoint, MongoSourceOptions,
 };
-use ce_stream_mysql::{FileCheckpointStore, MysqlBinlogSource, MysqlSourceOptions};
+use ce_stream_mysql::{MysqlBinlogSource, MysqlSourceOptions};
 use clap::Parser;
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
@@ -224,7 +225,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             schema = ce_stream_core::avro_encode::committed_transaction_schema_id(
                 &CommittedTransaction::default()
             ),
-            "transaction avro uses v1 unless a commit carries position or control, then v2"
+            "transaction avro: commits in this schema; progress and table definitions in their own"
         );
     }
 
@@ -237,6 +238,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         queue_capacity: cfg.source.queue_capacity,
         queue_max_bytes: cfg.source.queue_max_bytes,
         delivery_unit,
+        checkpoint: Default::default(),
     };
 
     if cfg.source.adapter == "mongo" {
@@ -265,6 +267,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             checkpoint_store: Some(Box::new(store)),
             skip_gate_check: args.skip_gate_check,
             include: Default::default(),
+            confirm: ce_stream_mongo::new_confirm(),
         };
         return capture(
             &mut source,
@@ -293,6 +296,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         checkpoint_store: Some(Box::new(store)),
         skip_gate_check: args.skip_gate_check,
         include: Default::default(),
+        confirm: ce_stream_mysql::new_confirm(),
     };
     capture(
         &mut source,
@@ -332,14 +336,18 @@ async fn capture<S: ChangeSource>(
             .await
     } else {
         source
-            .run_transactions(|txn| {
-                emit_transaction(out, &handle, &txn, sink_format)?;
+            .run_deliveries(|delivery| {
+                emit_delivery(out, &handle, &delivery, sink_format)?;
                 let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
                 if n == 1 || n.is_multiple_of(100) {
+                    let rows_in_commit = match &delivery {
+                        Delivery::Commit(txn) => txn.events.len(),
+                        _ => 0,
+                    };
                     tracing::info!(
                         target: "ce_stream::health",
-                        commits_total = n,
-                        rows_in_commit = txn.events.len(),
+                        deliveries_total = n,
+                        rows_in_commit,
                         uptime_secs = started.elapsed().as_secs(),
                         "capture health"
                     );
@@ -429,7 +437,7 @@ async fn seed_mongo(
                     events,
                     ..Default::default()
                 };
-                emit_transaction(out, &handle, &txn, sink_format)?;
+                emit_delivery(out, &handle, &Delivery::Commit(txn), sink_format)?;
             }
         }
     }
@@ -454,28 +462,28 @@ fn emit_row(
     })
 }
 
-fn emit_transaction(
+fn emit_delivery(
     out: &OutSink,
     handle: &tokio::runtime::Handle,
-    txn: &ce_stream_core::CommittedTransaction,
+    delivery: &Delivery,
     format: SinkFormat,
 ) -> Result<(), ce_stream_core::Error> {
     tokio::task::block_in_place(|| match out {
         OutSink::Stdout(_) => match format {
             SinkFormat::Json => {
-                let line = serde_json::to_string(txn)
+                let line = serde_json::to_string(delivery)
                     .map_err(|e| ce_stream_core::Error::Sink(e.to_string()))?;
                 println!("{line}");
                 Ok(())
             }
             SinkFormat::Avro => {
-                let bytes = ce_stream_core::avro_encode::encode_committed_transaction(txn)?;
+                let (bytes, _, _) = ce_stream_core::avro_encode::encode_delivery(delivery)?;
                 let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
                 println!("{b64}");
                 Ok(())
             }
         },
-        OutSink::Http(s) => handle.block_on(s.post_committed_transaction(txn)),
+        OutSink::Http(s) => handle.block_on(s.post_delivery(delivery)),
     })
 }
 
