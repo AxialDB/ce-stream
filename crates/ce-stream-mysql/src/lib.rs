@@ -4,10 +4,13 @@
 #![allow(clippy::double_must_use)]
 
 mod binlog_dispatch;
+pub mod charset;
+mod columns;
 mod ddl;
 mod dispatch;
 mod gate;
 mod gtid;
+mod json_text;
 mod map;
 mod txn_buffer;
 

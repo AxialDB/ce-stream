@@ -17,6 +17,16 @@ pub struct DeliverCtx<'a> {
     pub checkpoint: &'a mut Option<Checkpoint>,
 }
 
+/// The GTID of the `XA PREPARE` this position's `XA COMMIT` or `XA ROLLBACK`
+/// ends: it becomes executed with it.
+fn prepared_gtid(position: &SourcePosition) -> Option<String> {
+    position
+        .at
+        .get("prepared_gtid")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Deliver one committed transaction and persist checkpoint on full success.
 pub async fn deliver_committed<F, G>(
     txn: CommittedTransaction,
@@ -30,6 +40,7 @@ where
 {
     let gtid = commit_gtid(&txn).to_string();
     let gtid_set_after = commit_gtid_set_after(&txn).to_string();
+    let prepared = txn.position.as_ref().and_then(prepared_gtid);
     // A part that is not the last is not a commit: the transaction is not
     // executed until its last part, and a restart before it reads the
     // transaction again from its start.
@@ -53,6 +64,9 @@ where
 
     if !ends {
         return Ok(());
+    }
+    if let Some(prepared) = prepared {
+        ctx.executed.add_committed(&prepared)?;
     }
     ctx.executed.add_committed(&gtid)?;
     persist_gtid_set(
@@ -81,8 +95,12 @@ where
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let prepared = prepared_gtid(&position);
     if ctx.delivery_unit == DeliveryUnit::Transaction {
         on_delivery(Delivery::Progress { position })?;
+    }
+    if let Some(prepared) = prepared {
+        ctx.executed.add_committed(&prepared)?;
     }
     ctx.executed.add_committed(&gtid)?;
     persist_gtid_set(

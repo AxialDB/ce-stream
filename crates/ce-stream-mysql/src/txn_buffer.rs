@@ -1,13 +1,17 @@
 //! In-flight MySQL transaction buffer (commit-boundary emit).
 
+use ce_stream_core::delivery::TableSchema;
 use ce_stream_core::error::Result;
 use ce_stream_core::include::IncludeFilter;
 use ce_stream_core::source::{DEFAULT_PART_MAX_BYTES, DEFAULT_PART_MAX_ROWS};
-use ce_stream_core::transaction::{CommittedTransaction, DdlStatement, TransactionPart};
+use ce_stream_core::transaction::{
+    CommittedTransaction, ControlEvent, DdlStatement, TransactionPart,
+};
 use ce_stream_core::CloudEvent;
 
 use crate::gtid::{commit_position, ExecutedSet};
 use ce_stream_core::queue::{delivery_bytes, QueueBytes};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Buffers DDL + row CloudEvents until the transaction ends, or until they
@@ -37,6 +41,24 @@ pub struct TxnBuffer {
     /// The bytes waiting in the queue to the consumer, when the reader bounds
     /// them (`with_queue`). `None` in tests that read the queue themselves.
     queue: Option<Arc<QueueBytes>>,
+    /// The id of the XA transaction that is pending. Its rows are held whole:
+    /// it may yet roll back, and a part cannot be taken back.
+    xa_id: Option<String>,
+    /// XA transactions prepared and not yet ended, by id. Only memory: a
+    /// prepared GTID stays out of the executed set until it ends, so a restart
+    /// makes the server send the transaction again.
+    prepared: HashMap<String, PreparedXa>,
+    /// Controls of the pending transaction; they go with its last part.
+    control: Vec<ControlEvent>,
+    /// The last definition delivered of each table, by subject.
+    announced: HashMap<String, TableSchema>,
+}
+
+/// An XA transaction between its `XA PREPARE` and its end.
+#[derive(Debug)]
+pub struct PreparedXa {
+    pub gtid: String,
+    pub events: Vec<CloudEvent>,
 }
 
 impl TxnBuffer {
@@ -87,7 +109,9 @@ impl TxnBuffer {
     pub fn on_gtid(&mut self, gtid: String) {
         self.pending_gtid = Some(gtid);
         self.open = false;
+        self.xa_id = None;
         self.ddl.clear();
+        self.control.clear();
         self.events.clear();
         self.part_rows = 0;
         self.part_bytes = 0;
@@ -101,6 +125,44 @@ impl TxnBuffer {
 
     pub(crate) fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// The pending transaction is an XA transaction with this id.
+    pub(crate) fn begin_xa(&mut self, id: String) {
+        self.open = true;
+        self.xa_id = Some(id);
+    }
+
+    /// `XA PREPARE`: the pending transaction waits for its end, by its id.
+    pub(crate) fn prepare_xa(&mut self) -> std::result::Result<(), String> {
+        let id = self
+            .xa_id
+            .take()
+            .ok_or_else(|| "XA PREPARE without XA START".to_string())?;
+        let gtid = self
+            .pending_gtid
+            .take()
+            .ok_or_else(|| "XA PREPARE without pending GTID".to_string())?;
+        self.open = false;
+        self.part_rows = 0;
+        self.part_bytes = 0;
+        let events = std::mem::take(&mut self.events);
+        self.prepared.insert(id, PreparedXa { gtid, events });
+        Ok(())
+    }
+
+    /// The prepared transaction with this id, which is ending.
+    pub(crate) fn take_prepared(&mut self, id: &str) -> Option<PreparedXa> {
+        self.prepared.remove(id)
+    }
+
+    /// `XA COMMIT ... ONE PHASE`: the rows of the pending transaction, which
+    /// ends here and can no longer roll back.
+    pub(crate) fn take_xa_rows(&mut self) -> Vec<CloudEvent> {
+        self.xa_id = None;
+        self.part_rows = 0;
+        self.part_bytes = 0;
+        std::mem::take(&mut self.events)
     }
 
     /// Row events buffered for the transaction that is pending.
@@ -145,6 +207,22 @@ impl TxnBuffer {
         self.ddl.push(stmt);
     }
 
+    pub(crate) fn push_control(&mut self, control: ControlEvent) {
+        if control.subject.table.is_empty() || self.allows(&control.subject.as_subject()) {
+            self.control.push(control);
+        }
+    }
+
+    /// Is this definition new, or different from the last one delivered?
+    pub(crate) fn announce(&mut self, schema: &TableSchema) -> bool {
+        let subject = schema.subject.as_subject();
+        if self.announced.get(&subject) == Some(schema) {
+            return false;
+        }
+        self.announced.insert(subject, schema.clone());
+        true
+    }
+
     pub fn push_row(&mut self, event: CloudEvent) {
         self.push_row_sized(event, 0);
     }
@@ -175,8 +253,9 @@ impl TxnBuffer {
 
     /// The rows buffered fill a part: deliver them before the next row.
     pub(crate) fn part_full(&self) -> bool {
-        self.part_rows >= self.max_rows()
-            || (self.part_rows > 0 && self.part_bytes >= self.max_bytes())
+        self.xa_id.is_none()
+            && (self.part_rows >= self.max_rows()
+                || (self.part_rows > 0 && self.part_bytes >= self.max_bytes()))
     }
 
     /// The rows buffered so far, as a part of the pending transaction that is
@@ -222,7 +301,7 @@ impl TxnBuffer {
             part,
             position: Some(commit_position(&gtid, &gtid_set_after)),
             ddl: std::mem::take(&mut self.ddl),
-            control: Vec::new(),
+            control: std::mem::take(&mut self.control),
             events: std::mem::take(&mut self.events),
         })
     }

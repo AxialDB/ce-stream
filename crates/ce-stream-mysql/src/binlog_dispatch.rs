@@ -20,7 +20,7 @@ use crate::txn_buffer::TxnBuffer;
 #[doc(hidden)]
 pub struct TableMap {
     pub table: TableRef,
-    pub col_names: Vec<String>,
+    pub columns: Vec<crate::columns::Column>,
 }
 
 #[doc(hidden)]
@@ -42,8 +42,8 @@ pub(crate) fn dispatch_binlog_event(
     match data {
         EventData::Gtid(g) => {
             // A transaction that is still pending here had no end the
-            // adapter knows: an XA transaction, or one that was rolled back.
-            // It is not delivered, as before.
+            // adapter knows: one that was rolled back. It is not delivered,
+            // as before.
             if let Some(unfinished) = ctx.txn.pending_gtid() {
                 warn!(
                     gtid = unfinished,
@@ -54,7 +54,7 @@ pub(crate) fn dispatch_binlog_event(
             ctx.txn.set_include(ctx.include.snapshot_filter());
             ctx.txn.on_gtid(g.gtid);
         }
-        EventData::TableMap(tm) => apply_table_map(ctx.tables, tm),
+        EventData::TableMap(tm) => apply_table_map(ctx, tm)?,
         EventData::WriteRows(e) => buffer_rows(
             ctx,
             e.table_id,
@@ -75,6 +75,11 @@ pub(crate) fn dispatch_binlog_event(
         )?,
         EventData::Xid(_) => flush_commit(ctx)?,
         EventData::Query(q) => buffer_query(ctx, q)?,
+        EventData::XaPrepare(xa) if xa.one_phase => {
+            let rows = ctx.txn.take_xa_rows();
+            deliver_at_commit(ctx, rows, None)?;
+        }
+        EventData::XaPrepare(_) => ctx.txn.prepare_xa()?,
         EventData::TransactionPayload(tp) => {
             if tp.uncompressed_events.is_empty() {
                 return Err("binlog transaction compression: empty uncompressed payload".into());
@@ -89,15 +94,30 @@ pub(crate) fn dispatch_binlog_event(
     Ok(())
 }
 
-fn apply_table_map(tables: &mut HashMap<u64, TableMap>, tm: TableMapEvent) {
-    let col_names = column_names_from_table_map(&tm);
-    tables.insert(
+fn apply_table_map(
+    ctx: &mut BinlogDispatchCtx<'_>,
+    tm: TableMapEvent,
+) -> std::result::Result<(), String> {
+    let columns = crate::columns::columns_of(&tm);
+    let schema = crate::columns::schema_of(&tm);
+    let table = TableRef::new(tm.database_name, tm.table_name);
+    ctx.tables.insert(
         tm.table_id,
         TableMap {
-            table: TableRef::new(tm.database_name, tm.table_name),
-            col_names,
+            table: table.clone(),
+            columns,
         },
     );
+    // MySQL repeats the table map in every transaction: a definition is
+    // delivered on first sight and on a change.
+    if let Some(schema) = schema.filter(|_| ctx.txn.allows(&table.as_subject())) {
+        if ctx.txn.announce(&schema) {
+            ctx.tx
+                .blocking_send(Ok(Delivery::Schema(schema)))
+                .map_err(|_| "event channel closed".to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// A `Query` event either belongs to a transaction in brackets or is a
@@ -107,6 +127,15 @@ fn buffer_query(
     ctx: &mut BinlogDispatchCtx<'_>,
     q: mysql_binlog_connector_rust::event::query_event::QueryEvent,
 ) -> std::result::Result<(), String> {
+    match ddl::xa_statement(&q.query) {
+        Some(ddl::XaStatement::Start(id)) => {
+            ctx.txn.begin_xa(id);
+            return Ok(());
+        }
+        Some(ddl::XaStatement::Commit(id)) => return end_xa(ctx, &id, true),
+        Some(ddl::XaStatement::Rollback(id)) => return end_xa(ctx, &id, false),
+        None => {}
+    }
     match ddl::query_kind(&q.query) {
         ddl::QueryKind::Begin => {
             ctx.txn.mark_open();
@@ -142,6 +171,9 @@ fn buffer_query(
                 .pending_gtid()
                 .ok_or_else(|| "DDL query without pending GTID".to_string())?;
             let opens = ddl::ddl_opens_transaction(&q.query);
+            for control in ddl::ddl_controls(&q.schema, &q.query) {
+                ctx.txn.push_control(control);
+            }
             ctx.txn.push_ddl(ce_stream_core::transaction::DdlStatement {
                 schema: q.schema,
                 query: q.query,
@@ -159,8 +191,8 @@ fn buffer_query(
         ddl::QueryKind::Other => {
             debug!(schema = %q.schema, query = %q.query, "ignored non-DDL query");
             if ctx.txn.pending_gtid().is_some() && !ctx.txn.is_open() {
-                // `GRANT`, `ANALYZE TABLE`, `XA COMMIT`: nothing to deliver
-                // but the transaction itself, so that its GTID is executed.
+                // `GRANT`, `ANALYZE TABLE`: nothing to deliver but the
+                // transaction itself, so that its GTID is executed.
                 flush_commit(ctx)
             } else {
                 Ok(())
@@ -169,9 +201,85 @@ fn buffer_query(
     }
 }
 
+/// `XA COMMIT` or `XA ROLLBACK` of a prepared transaction, which is a
+/// transaction of its own in the binlog, holding no rows. The rows of a commit
+/// are delivered here, at this position; those of a rollback are dropped.
+fn end_xa(
+    ctx: &mut BinlogDispatchCtx<'_>,
+    id: &str,
+    commit: bool,
+) -> std::result::Result<(), String> {
+    let prepared = ctx.txn.take_prepared(id);
+    if commit && prepared.is_none() {
+        // Its rows are in a transaction the reader did not see: prepared
+        // before capture started, or purged from the binlog. They may be
+        // rows of a watched table, and the consumer must not go on without
+        // them.
+        return Err(format!(
+            "XA COMMIT {id}: the transaction was prepared before capture started, \
+             or its XA PREPARE is no longer in the binlog; its rows cannot be delivered"
+        ));
+    }
+    let (rows, prepared_gtid) = match prepared {
+        Some(xa) if commit => (xa.events, Some(xa.gtid)),
+        Some(xa) => (Vec::new(), Some(xa.gtid)),
+        None => (Vec::new(), None),
+    };
+    deliver_at_commit(ctx, rows, prepared_gtid)
+}
+
+/// Deliver held rows as the pending transaction, in parts when they fill them.
+/// The rows name this transaction: it is the one that committed them.
+fn deliver_at_commit(
+    ctx: &mut BinlogDispatchCtx<'_>,
+    rows: Vec<CloudEvent>,
+    prepared_gtid: Option<String>,
+) -> std::result::Result<(), String> {
+    let Some(pending) = ctx.txn.pending_gtid().map(str::to_string) else {
+        return Err("XA end without preceding GTID event".into());
+    };
+    let executed = ctx.executed;
+    if let Some(prepared) = &prepared_gtid {
+        ctx.txn
+            .pass_on(prepared, || start_set(executed))
+            .map_err(|e| e.to_string())?;
+    }
+    let gtid_set = ctx
+        .txn
+        .set_after(&pending, || start_set(executed))
+        .map_err(|e| e.to_string())?;
+    for mut event in rows {
+        event
+            .extensions
+            .insert("gtid".into(), serde_json::Value::String(pending.clone()));
+        event.extensions.insert(
+            "gtidset".into(),
+            serde_json::Value::String(gtid_set.clone()),
+        );
+        if ctx.txn.part_full() {
+            if let Some(part) = ctx.txn.take_part() {
+                ctx.txn.reserve_queue(&part)?;
+                ctx.tx
+                    .blocking_send(Ok(Delivery::Commit(part)))
+                    .map_err(|_| "event channel closed".to_string())?;
+            }
+        }
+        let bytes = approx_json_bytes(&event.data);
+        ctx.txn.push_row_sized(event, bytes);
+    }
+    finish_commit(ctx, prepared_gtid)
+}
+
 /// Deliver the pending transaction: at its `Xid`, at its `COMMIT`, or at a
 /// statement that is a transaction by itself.
 fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), String> {
+    finish_commit(ctx, None)
+}
+
+fn finish_commit(
+    ctx: &mut BinlogDispatchCtx<'_>,
+    prepared_gtid: Option<String>,
+) -> std::result::Result<(), String> {
     let Some(pending) = ctx.txn.pending_gtid().map(str::to_string) else {
         return Err("XID without preceding GTID event".into());
     };
@@ -182,9 +290,13 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
         .pass_on(&pending, || start_set(executed))
         .map_err(|e| e.to_string())?;
 
-    let Some(commit) = ctx.txn.take_commit(gtid_set_after) else {
+    let Some(mut commit) = ctx.txn.take_commit(gtid_set_after) else {
         return Err("XID without pending GTID".into());
     };
+    // The prepared GTID becomes executed with this transaction, which ends it.
+    if let (Some(prepared), Some(position)) = (prepared_gtid, commit.position.as_mut()) {
+        position.at["prepared_gtid"] = serde_json::Value::String(prepared);
+    }
 
     // A transaction with nothing for the consumer still moves the position: a
     // consumer waiting for one (a seed's target) sees the stream pass it.
@@ -210,26 +322,6 @@ fn flush_commit(ctx: &mut BinlogDispatchCtx<'_>) -> std::result::Result<(), Stri
 /// built from it would leave out the commits that still wait there.
 fn start_set(executed: &Arc<Mutex<ExecutedSet>>) -> ce_stream_core::error::Result<ExecutedSet> {
     ExecutedSet::from_set_string(&executed.blocking_lock().to_set_string())
-}
-
-fn column_names_from_table_map(tm: &TableMapEvent) -> Vec<String> {
-    if let Some(meta) = &tm.table_metadata {
-        let names: Vec<String> = meta
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| c.column_name.clone().unwrap_or_else(|| format!("col_{i}")))
-            .collect();
-        if names.iter().any(|n| !n.starts_with("col_")) {
-            return names;
-        }
-        if !names.is_empty() {
-            return names;
-        }
-    }
-    (0..tm.column_types.len())
-        .map(|i| format!("col_{i}"))
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -270,7 +362,7 @@ where
         .map_err(|e| e.to_string())?;
 
     let table = tm.table.clone();
-    let col_names = tm.col_names.clone();
+    let columns = tm.columns.clone();
 
     for (before, after) in rows {
         let data = match ctx.payload_mode {
@@ -283,7 +375,7 @@ where
                     let after = after.ok_or_else(|| "insert missing after".to_string())?;
                     serde_json::json!({
                         "op": "insert",
-                        "after": map::row_to_object(&col_names, after),
+                        "after": map::row_to_object(&columns, after)?,
                     })
                 }
                 ChangeOp::Update => {
@@ -291,15 +383,15 @@ where
                     let after = after.ok_or_else(|| "update missing after".to_string())?;
                     serde_json::json!({
                         "op": "update",
-                        "before": map::row_to_object(&col_names, before),
-                        "after": map::row_to_object(&col_names, after),
+                        "before": map::row_to_object(&columns, before)?,
+                        "after": map::row_to_object(&columns, after)?,
                     })
                 }
                 ChangeOp::Delete => {
                     let before = before.ok_or_else(|| "delete missing before".to_string())?;
                     serde_json::json!({
                         "op": "delete",
-                        "before": map::row_to_object(&col_names, before),
+                        "before": map::row_to_object(&columns, before)?,
                     })
                 }
             },

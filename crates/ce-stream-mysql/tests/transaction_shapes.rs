@@ -20,6 +20,7 @@ use mysql_binlog_connector_rust::event::query_event::QueryEvent;
 use mysql_binlog_connector_rust::event::row_event::RowEvent;
 use mysql_binlog_connector_rust::event::table_map_event::TableMapEvent;
 use mysql_binlog_connector_rust::event::write_rows_event::WriteRowsEvent;
+use mysql_binlog_connector_rust::event::xa_prepare_event::XaPrepareEvent;
 use mysql_binlog_connector_rust::event::xid_event::XidEvent;
 use tokio::sync::{mpsc, Mutex};
 
@@ -455,17 +456,22 @@ fn a_savepoint_inside_a_transaction_does_not_end_it() {
     assert_eq!(delivered[0].1.events.len(), 2);
 }
 
-/// XA transactions are not supported: the prepared part has no end the
-/// adapter knows and is not delivered, as before. The stream goes on, and
-/// the `XA COMMIT` is an empty transaction of its own.
+/// An XA transaction is delivered at its `XA COMMIT`, whose position it takes,
+/// and the stream goes on. The rest is in `tests/deliveries.rs`.
 #[test]
-fn an_xa_transaction_does_not_stop_the_stream() {
+fn an_xa_transaction_is_delivered_at_its_commit() {
     let delivered = run(vec![
         gtid(1),
         query("XA START X'61',X'',1"),
         table_map(),
         write_rows(2),
         query("XA END X'61',X'',1"),
+        EventData::XaPrepare(XaPrepareEvent {
+            one_phase: false,
+            format_id: 1,
+            gtrid: "a".into(),
+            bqual: String::new(),
+        }),
         gtid(2),
         query("XA COMMIT X'61',X'',1"),
         gtid(3),
@@ -476,7 +482,7 @@ fn an_xa_transaction_does_not_stop_the_stream() {
     ]);
     let gtids: Vec<&str> = delivered.iter().map(|(_, c)| commit_gtid(c)).collect();
     assert_eq!(gtids, ["uuid:2", "uuid:3"]);
-    assert!(delivered[0].1.events.is_empty());
+    assert_eq!(delivered[0].1.events.len(), 2);
     assert_eq!(delivered[1].1.events.len(), 1);
 }
 
