@@ -5,6 +5,7 @@ Manual integration tests that kill ce-stream mid-delivery and assert full transa
 | Adapter | Path | Status |
 |---------|------|--------|
 | MySQL 9.x | [`mysql/`](mysql/) | Active |
+| PostgreSQL 17+ | [`postgres/`](postgres/) | Active |
 
 Run artifacts land under `<adapter>/out/<timestamp>/` (gitignored). Never commit passwords.
 

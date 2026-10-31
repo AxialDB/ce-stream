@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use ce_stream_core::delivery::Delivery;
+use ce_stream_core::delivery::{has_resume_payload, CheckpointMode, Delivery};
 use ce_stream_core::event::{CloudEvent, PayloadMode, SinkFormat, TableRef};
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
 use ce_stream_core::transaction::{CommittedTransaction, SourcePosition};
@@ -13,6 +13,7 @@ use ce_stream_mongo::{
     MongoChangeStreamSource, MongoCheckpoint, MongoSourceOptions,
 };
 use ce_stream_mysql::{MysqlBinlogSource, MysqlSourceOptions};
+use ce_stream_postgres::{PostgresOptions, PostgresSource, PostgresStreamOptions};
 use clap::Parser;
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
@@ -90,6 +91,29 @@ struct SourceSection {
     /// ... and at most this many bytes of row data.
     #[serde(default = "default_part_max_bytes")]
     part_max_bytes: usize,
+    /// on_ok (default) | on_confirm: the checkpoint moves once the sink has the
+    /// delivery, inside the callback or after it. on_confirm needs transaction delivery.
+    #[serde(default = "default_checkpoint_mode")]
+    checkpoint: String,
+    /// PostgreSQL: a PEM file of roots. Without one TLS encrypts and checks nothing.
+    #[serde(default)]
+    tls_ca: Option<PathBuf>,
+    /// PostgreSQL: the replication slot.
+    #[serde(default)]
+    slot: String,
+    /// PostgreSQL: the publication.
+    #[serde(default = "default_publication")]
+    publication: String,
+    /// PostgreSQL: prefixes of logical messages to deliver.
+    #[serde(default)]
+    message_prefixes: Vec<String>,
+    /// PostgreSQL: the lowest server version the gate takes, such as "17.5".
+    #[serde(default = "default_min_server_version")]
+    min_server_version: String,
+    /// PostgreSQL: make the slot when it does not exist. Otherwise a missing
+    /// slot is an error: the changes since it went are gone.
+    #[serde(default)]
+    create_slot: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +167,18 @@ fn default_full_document() -> String {
     "required".into()
 }
 
+fn default_checkpoint_mode() -> String {
+    "on_ok".into()
+}
+
+fn default_publication() -> String {
+    "ce_stream".into()
+}
+
+fn default_min_server_version() -> String {
+    "17".into()
+}
+
 enum OutSink {
     Stdout(StdoutSink),
     Http(HttpSink),
@@ -190,6 +226,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let payload_mode = parse_payload_mode(&cfg.source.payload_mode)?;
     let delivery_unit = parse_delivery_unit(&cfg.source.delivery_unit)?;
     let sink_format = parse_sink_format(&cfg.sink.format)?;
+    let checkpoint_mode = parse_checkpoint_mode(&cfg.source.checkpoint)?;
 
     let out = match cfg.sink.kind.as_str() {
         "stdout" => OutSink::Stdout(StdoutSink::new(sink_format)),
@@ -238,8 +275,53 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         queue_capacity: cfg.source.queue_capacity,
         queue_max_bytes: cfg.source.queue_max_bytes,
         delivery_unit,
-        checkpoint: Default::default(),
+        checkpoint: checkpoint_mode,
     };
+    let confirming = checkpoint_mode == CheckpointMode::OnConfirm;
+
+    if cfg.source.adapter == "postgres" {
+        let options = PostgresOptions {
+            host: cfg.source.host.clone(),
+            port: cfg.source.port,
+            user: cfg.source.user.clone(),
+            password: cfg.source.password.clone(),
+            database: cfg.source.database.clone(),
+            tls: cfg.source.tls,
+            tls_ca: cfg.source.tls_ca.clone(),
+        };
+        if cfg.source.create_slot
+            && ce_stream_postgres::slot_figures(&options, &cfg.source.slot)
+                .await?
+                .is_none()
+        {
+            let at = ce_stream_postgres::create_slot(&options, &cfg.source.slot).await?;
+            tracing::info!(slot = %cfg.source.slot, %at, "made the replication slot");
+        }
+        let mut source = PostgresSource {
+            options,
+            stream: PostgresStreamOptions {
+                slot: cfg.source.slot.clone(),
+                publication: cfg.source.publication.clone(),
+                message_prefixes: cfg.source.message_prefixes.clone(),
+                min_server_version: parse_server_version(&cfg.source.min_server_version)?,
+            },
+            config,
+            checkpoint,
+            checkpoint_store: Some(Box::new(store)),
+            skip_gate_check: args.skip_gate_check,
+            include: Default::default(),
+            confirm: ce_stream_postgres::new_confirm(),
+        };
+        return capture(
+            &mut source,
+            delivery_unit,
+            &out,
+            sink_format,
+            args.max_events,
+            confirming,
+        )
+        .await;
+    }
 
     if cfg.source.adapter == "mongo" {
         let full_document = parse_full_document(&cfg.source.full_document)?;
@@ -275,6 +357,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             &out,
             sink_format,
             args.max_events,
+            confirming,
         )
         .await;
     }
@@ -304,8 +387,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &out,
         sink_format,
         args.max_events,
+        confirming,
     )
     .await
+}
+
+/// What the sink now has, as a position to confirm. A part that is not the last
+/// and a table definition have none.
+fn confirmable(delivery: &Delivery) -> Option<&SourcePosition> {
+    let position = match delivery {
+        Delivery::Commit(txn) => txn.position.as_ref(),
+        Delivery::Progress { position } => Some(position),
+        Delivery::Schema(_) => None,
+    }?;
+    has_resume_payload(position).then_some(position)
 }
 
 async fn capture<S: ChangeSource>(
@@ -314,11 +409,13 @@ async fn capture<S: ChangeSource>(
     out: &OutSink,
     sink_format: SinkFormat,
     max: u64,
+    confirming: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let emitted = Arc::new(AtomicU64::new(0));
     let emitted_cb = Arc::clone(&emitted);
     let started = Instant::now();
     let handle = tokio::runtime::Handle::current();
+    let confirm = confirming.then(|| source.confirm());
 
     let run_result = if delivery_unit == DeliveryUnit::Row {
         source
@@ -338,6 +435,9 @@ async fn capture<S: ChangeSource>(
         source
             .run_deliveries(|delivery| {
                 emit_delivery(out, &handle, &delivery, sink_format)?;
+                if let (Some(confirm), Some(position)) = (&confirm, confirmable(&delivery)) {
+                    confirm.confirm(position)?;
+                }
                 let n = emitted_cb.fetch_add(1, Ordering::SeqCst) + 1;
                 if n == 1 || n.is_multiple_of(100) {
                     let rows_in_commit = match &delivery {
@@ -553,15 +653,52 @@ fn parse_full_document(s: &str) -> Result<FullDocumentMode, String> {
     }
 }
 
+fn parse_checkpoint_mode(s: &str) -> Result<CheckpointMode, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on_ok" => Ok(CheckpointMode::OnOk),
+        "on_confirm" => Ok(CheckpointMode::OnConfirm),
+        other => Err(format!(
+            "source.checkpoint must be on_ok|on_confirm, got {other}"
+        )),
+    }
+}
+
+/// "17" or "17.5".
+fn parse_server_version(s: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("source.min_server_version must be like 17 or 17.5, got {s}");
+    let (major, minor) = s.trim().split_once('.').unwrap_or((s.trim(), "0"));
+    Ok((
+        major.parse().map_err(|_| bad())?,
+        minor.parse().map_err(|_| bad())?,
+    ))
+}
+
+type ValidateFn = fn(&FileConfig) -> Result<(), String>;
+
+/// Every adapter the CLI has, and what its section must hold.
+const ADAPTERS: &[(&str, ValidateFn)] = &[
+    ("mysql", validate_mysql),
+    ("mongo", validate_mongo),
+    ("postgres", validate_postgres),
+];
+
 fn validate_config(cfg: &FileConfig) -> Result<(), String> {
-    match cfg.source.adapter.as_str() {
-        "mysql" => validate_mysql(cfg)?,
-        "mongo" => validate_mongo(cfg)?,
-        other => {
-            return Err(format!(
-                "unsupported source.adapter: {other} (mysql or mongo)"
-            ));
-        }
+    let Some((_, validate)) = ADAPTERS
+        .iter()
+        .find(|(name, _)| *name == cfg.source.adapter)
+    else {
+        let names: Vec<&str> = ADAPTERS.iter().map(|(name, _)| *name).collect();
+        return Err(format!(
+            "unsupported source.adapter: {} (one of {})",
+            cfg.source.adapter,
+            names.join(", ")
+        ));
+    };
+    validate(cfg)?;
+    if parse_checkpoint_mode(&cfg.source.checkpoint)? == CheckpointMode::OnConfirm
+        && parse_delivery_unit(&cfg.source.delivery_unit)? == DeliveryUnit::Row
+    {
+        return Err("source.checkpoint = on_confirm needs delivery_unit = transaction".into());
     }
     if cfg.source.include_tables.is_empty() {
         return Err("source.include_tables must list at least one database.table".into());
@@ -614,6 +751,28 @@ fn validate_mysql(cfg: &FileConfig) -> Result<(), String> {
     if cfg.source.server_id == 0 {
         return Err("source.server_id must be a unique non-zero replica id".into());
     }
+    if !cfg.source.tls {
+        tracing::warn!("source.tls=false; TLS is recommended for production capture");
+    }
+    Ok(())
+}
+
+fn validate_postgres(cfg: &FileConfig) -> Result<(), String> {
+    for (key, value) in [
+        ("host", &cfg.source.host),
+        ("user", &cfg.source.user),
+        ("database", &cfg.source.database),
+        ("slot", &cfg.source.slot),
+        ("publication", &cfg.source.publication),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("source.{key} must not be empty"));
+        }
+    }
+    if cfg.source.port == 0 {
+        return Err("source.port must be > 0".into());
+    }
+    parse_server_version(&cfg.source.min_server_version)?;
     if !cfg.source.tls {
         tracing::warn!("source.tls=false; TLS is recommended for production capture");
     }

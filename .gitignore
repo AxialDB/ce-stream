@@ -8,6 +8,7 @@ ce-stream-crash-test.toml
 *.swp
 scripts/perf/out/
 scripts/crash-harness/mysql/out/
+scripts/crash-harness/postgres/out/
 releases/staging/
 releases/staging/
 releases/dist/

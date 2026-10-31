@@ -205,8 +205,10 @@ fn create_table_select_is_one_transaction_with_its_rows() {
     assert_eq!(delivered[0].1.events.len(), 3);
 }
 
-/// The shape of each delivery: rows, DDL statements, part.
-fn shapes(delivered: &[(usize, CommittedTransaction)]) -> Vec<(usize, usize, Option<(u32, bool)>)> {
+/// The shape of a delivery: rows, DDL statements, part.
+type Shape = (usize, usize, Option<(u32, bool)>);
+
+fn shapes(delivered: &[(usize, CommittedTransaction)]) -> Vec<Shape> {
     delivered
         .iter()
         .map(|(_, c)| {

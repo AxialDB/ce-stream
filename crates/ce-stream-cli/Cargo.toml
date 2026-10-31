@@ -21,6 +21,7 @@ base64 = { workspace = true }
 ce-stream-core = { workspace = true }
 ce-stream-mongo = { workspace = true }
 ce-stream-mysql = { workspace = true }
+ce-stream-postgres = { workspace = true }
 mongodb = "3.9.1"
 chrono = { workspace = true }
 clap = { workspace = true }

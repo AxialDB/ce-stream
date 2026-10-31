@@ -4,6 +4,7 @@ members = [
     "crates/ce-stream-core",
     "crates/ce-stream-mysql",
     "crates/ce-stream-mongo",
+    "crates/ce-stream-postgres",
     "crates/ce-stream-cli",
     "crates/ce-stream-spike",
     "crates/ce-stream-perf-sink",
@@ -22,6 +23,7 @@ rust-version = "1.75"
 ce-stream-core = { version = "0.5.0", path = "crates/ce-stream-core" }
 ce-stream-mysql = { version = "0.5.0", path = "crates/ce-stream-mysql" }
 ce-stream-mongo = { version = "0.5.0", path = "crates/ce-stream-mongo" }
+ce-stream-postgres = { version = "0.5.0", path = "crates/ce-stream-postgres" }
 mysql-binlog-connector-rust = { package = "ce-stream-mysql-binlog", version = "0.1.0", path = "vendor/mysql-binlog-connector-rust", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
