@@ -3,12 +3,14 @@
 use async_trait::async_trait;
 use ce_stream_core::delivery::{CheckpointMode, Confirm, Delivery};
 use ce_stream_core::error::{Error, Result};
-use ce_stream_core::event::CloudEvent;
+use ce_stream_core::event::{CloudEvent, PayloadMode};
 use ce_stream_core::gate::GateReport;
 use ce_stream_core::include::{IncludeFilter, IncludeList};
-use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
+use ce_stream_core::queue::{delivery_bytes, QueueBytes};
+use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig, DEFAULT_QUEUE_MAX_BYTES};
 use ce_stream_core::transaction::{ControlEvent, SourcePosition};
 use ce_stream_core::{Checkpoint, CheckpointStore};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mongodb::bson::{doc, Document, Timestamp};
@@ -184,7 +186,7 @@ impl MongoChangeStreamSource {
             .as_ref()
             .and_then(MongoCheckpoint::from_checkpoint);
         let seed = stored.as_ref().and_then(|s| s.seed_cluster_time);
-        let mut start = match (stored.as_ref().and_then(resume_token), seed) {
+        let start = match (stored.as_ref().and_then(resume_token), seed) {
             (Some(token), _) => Start::After(token),
             (None, Some(seed_time)) => Start::At(Timestamp {
                 time: seed_time.t,
@@ -192,16 +194,6 @@ impl MongoChangeStreamSource {
             }),
             (None, None) => Start::Now,
         };
-
-        let database = client.database(&self.options.database);
-        let mut open = in_this_database(&self.options.database, &self.include.snapshot_filter());
-        let mut stream = self.open_stream(&database, &open, &start).await?;
-        self.include.set_in_effect(Some(open.clone()));
-        let _in_effect = InEffect(self.include.clone());
-        // The last place read from the server: an event, or the end of an empty batch.
-        let mut last_read: Option<ResumeToken> = None;
-        let mut grouper = TxnGrouper::new(seed)
-            .with_part_limits(self.config.part_max_rows, self.config.part_max_bytes);
         tracing::info!(
             database = %self.options.database,
             part_max_rows = self.config.part_max_rows,
@@ -209,93 +201,61 @@ impl MongoChangeStreamSource {
             "starting MongoDB change stream source"
         );
 
-        let mut confirmed = self.confirm.subscribe();
-        loop {
-            // Under OnConfirm the checkpoint moves here, between two reads.
-            if confirmed.has_changed().unwrap_or(false) {
-                let position = confirmed.borrow_and_update().clone();
-                if let Some(position) = position {
-                    self.save_position(&position).await?;
-                }
-            }
-            // TxnGrouper pins this filter when the group starts. Later events in the group ignore a newer list.
-            let filter = self.include.snapshot_filter();
-            let wanted = in_this_database(&self.options.database, &filter);
-            if !covers(&open, &wanted) {
-                // The list gained a collection the server leaves out. Open the stream again
-                // where this one stopped reading, with the wider filter: what follows that
-                // place is sent once, and nothing of it is skipped.
-                if let Some(token) = last_read.clone().or_else(|| stream.resume_token()) {
-                    start = Start::After(token);
-                }
-                stream = self.open_stream(&database, &wanted, &start).await?;
-                open = wanted;
-                self.include.set_in_effect(Some(open.clone()));
-                tracing::info!(
-                    database = %self.options.database,
-                    "change stream opened again with a wider include list"
-                );
-            }
-            match stream.next_if_any().await.map_err(map_mongo)? {
-                Some(event) => {
-                    last_read = Some(event.id.clone());
-                    let incoming = map_change(
-                        raw_change(event)?,
-                        &self.config.source_id,
-                        self.config.payload_mode,
-                    );
-                    for emit in grouper.push(incoming, &filter) {
-                        let stop = self.deliver(emit, &mut on_row, &mut on_delivery).await?;
-                        if stop {
-                            return Ok(());
-                        }
-                    }
-                }
-                None => {
-                    if !stream.is_alive() {
-                        return Ok(());
-                    }
-                    let token = stream.resume_token();
-                    if token.is_some() {
-                        last_read = token.clone();
-                    }
-                    let token = token.and_then(|t| token_json(&t).ok());
-                    for emit in grouper.on_batch_boundary(token) {
-                        let stop = self.deliver(emit, &mut on_row, &mut on_delivery).await?;
-                        if stop {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-    }
+        // The reader and the consumer are apart, as on every adapter with a
+        // reader task: a slow consumer holds the reader at the queue's limits.
+        let queue_max_bytes = match self.config.queue_max_bytes {
+            0 => DEFAULT_QUEUE_MAX_BYTES,
+            bytes => bytes,
+        };
+        let queue = Arc::new(QueueBytes::new(queue_max_bytes as u64));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.queue_capacity.max(1));
+        let reader = Reader {
+            database: client.database(&self.options.database),
+            options: self.options.clone(),
+            source_id: self.config.source_id.clone(),
+            payload_mode: self.config.payload_mode,
+            include: self.include.clone(),
+            grouper: TxnGrouper::new(seed)
+                .with_part_limits(self.config.part_max_rows, self.config.part_max_bytes),
+            start,
+            queue: Arc::clone(&queue),
+            tx,
+        };
+        let task = tokio::spawn(reader.run());
 
-    async fn open_stream(
-        &self,
-        database: &Database,
-        filter: &IncludeFilter,
-        start: &Start,
-    ) -> Result<ChangeStream<ChangeStreamEvent<Document>>> {
-        let mut watch = database.watch().max_await_time(AWAIT).full_document(
-            match self.options.full_document {
-                FullDocumentMode::Required => FullDocumentType::Required,
-                FullDocumentMode::UpdateLookup => FullDocumentType::UpdateLookup,
-            },
-        );
-        let resume_after = match start {
-            Start::After(token) => Some(token),
-            _ => None,
+        let on_confirm = self.config.checkpoint == CheckpointMode::OnConfirm;
+        let mut confirmed = self.confirm.subscribe();
+        let result = loop {
+            let emit = tokio::select! {
+                emit = rx.recv() => emit,
+                changed = confirmed.changed(), if on_confirm => {
+                    if changed.is_ok() {
+                        let position = confirmed.borrow_and_update().clone();
+                        if let Some(position) = position {
+                            if let Err(err) = self.save_position(&position).await {
+                                break Err(err);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            };
+            let emit = match emit {
+                None => break Ok(()),
+                Some(Err(err)) => break Err(err),
+                Some(Ok(emit)) => emit,
+            };
+            let bytes = delivery_bytes(&emit.txn);
+            match self.deliver(emit, &mut on_row, &mut on_delivery).await {
+                Ok(true) => break Ok(()),
+                Ok(false) => queue.release(bytes),
+                Err(err) => break Err(err),
+            }
         };
-        if let Some(stage) = server_filter(&self.options.database, filter, resume_after) {
-            watch = watch.pipeline([stage]);
-        }
-        watch = match start {
-            Start::Now => watch,
-            Start::After(token) => watch.resume_after(token.clone()),
-            Start::At(time) => watch.start_at_operation_time(*time),
-        };
-        watch.await.map_err(map_mongo)
+        // A reader blocked on a full queue, or waiting for the server, ends here.
+        queue.close();
+        task.abort();
+        result
     }
 
     async fn deliver<RowFn, DeliveryFn>(
@@ -348,6 +308,127 @@ impl MongoChangeStreamSource {
         }
         Ok(stop)
     }
+}
+
+/// The change stream, read apart from the consumer.
+struct Reader {
+    database: Database,
+    options: MongoSourceOptions,
+    source_id: String,
+    payload_mode: PayloadMode,
+    include: IncludeList,
+    grouper: TxnGrouper,
+    start: Start,
+    queue: Arc<QueueBytes>,
+    tx: tokio::sync::mpsc::Sender<Result<Emit>>,
+}
+
+impl Reader {
+    async fn run(mut self) {
+        let tx = self.tx.clone();
+        if let Err(err) = self.read().await {
+            let _ = tx.send(Err(err)).await;
+        }
+    }
+
+    /// Ends when the stream does, on a control event that stops it, or when
+    /// the consumer is gone.
+    async fn read(&mut self) -> Result<()> {
+        let name = self.options.database.clone();
+        let mut open = in_this_database(&name, &self.include.snapshot_filter());
+        let mut stream = open_stream(&self.database, &self.options, &open, &self.start).await?;
+        self.include.set_in_effect(Some(open.clone()));
+        let _in_effect = InEffect(self.include.clone());
+        // The last place read from the server: an event, or the end of an empty batch.
+        let mut last_read: Option<ResumeToken> = None;
+
+        loop {
+            // TxnGrouper pins this filter when the group starts. Later events in the group ignore a newer list.
+            let filter = self.include.snapshot_filter();
+            let wanted = in_this_database(&name, &filter);
+            if !covers(&open, &wanted) {
+                // The list gained a collection the server leaves out. Open the stream again
+                // where this one stopped reading, with the wider filter: what follows that
+                // place is sent once, and nothing of it is skipped.
+                if let Some(token) = last_read.clone().or_else(|| stream.resume_token()) {
+                    self.start = Start::After(token);
+                }
+                stream = open_stream(&self.database, &self.options, &wanted, &self.start).await?;
+                open = wanted;
+                self.include.set_in_effect(Some(open.clone()));
+                tracing::info!(
+                    database = %name,
+                    "change stream opened again with a wider include list"
+                );
+            }
+            let emits = match stream.next_if_any().await.map_err(map_mongo)? {
+                Some(event) => {
+                    last_read = Some(event.id.clone());
+                    let incoming =
+                        map_change(raw_change(event)?, &self.source_id, self.payload_mode);
+                    self.grouper.push(incoming, &filter)
+                }
+                None => {
+                    if !stream.is_alive() {
+                        return Ok(());
+                    }
+                    let token = stream.resume_token();
+                    if token.is_some() {
+                        last_read = token.clone();
+                    }
+                    let token = token.and_then(|t| token_json(&t).ok());
+                    self.grouper.on_batch_boundary(token)
+                }
+            };
+            for emit in emits {
+                if !self.hand_over(emit).await {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Wait for room in the queue and pass one delivery on. False when reading
+    /// is over: the consumer is gone, or the delivery ends the stream.
+    async fn hand_over(&self, emit: Emit) -> bool {
+        let stop = emit.stop;
+        let bytes = delivery_bytes(&emit.txn);
+        let queue = Arc::clone(&self.queue);
+        let room = tokio::task::spawn_blocking(move || queue.reserve(bytes)).await;
+        if !matches!(room, Ok(Ok(()))) {
+            return false;
+        }
+        self.tx.send(Ok(emit)).await.is_ok() && !stop
+    }
+}
+
+async fn open_stream(
+    database: &Database,
+    options: &MongoSourceOptions,
+    filter: &IncludeFilter,
+    start: &Start,
+) -> Result<ChangeStream<ChangeStreamEvent<Document>>> {
+    let mut watch =
+        database
+            .watch()
+            .max_await_time(AWAIT)
+            .full_document(match options.full_document {
+                FullDocumentMode::Required => FullDocumentType::Required,
+                FullDocumentMode::UpdateLookup => FullDocumentType::UpdateLookup,
+            });
+    let resume_after = match start {
+        Start::After(token) => Some(token),
+        _ => None,
+    };
+    if let Some(stage) = server_filter(&options.database, filter, resume_after) {
+        watch = watch.pipeline([stage]);
+    }
+    watch = match start {
+        Start::Now => watch,
+        Start::After(token) => watch.resume_after(token.clone()),
+        Start::At(time) => watch.start_at_operation_time(*time),
+    };
+    watch.await.map_err(map_mongo)
 }
 
 fn control_event(control: &ControlEvent, source_id: &str) -> CloudEvent {
