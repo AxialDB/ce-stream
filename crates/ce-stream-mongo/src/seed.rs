@@ -13,7 +13,7 @@ use mongodb::options::ReadConcern;
 use mongodb::{Client, Cursor};
 use serde_json::json;
 
-use crate::bson_json::document_to_json_owned;
+use crate::bson_json::document_image;
 use crate::checkpoint::ClusterTime;
 use crate::source::map_mongo;
 
@@ -108,7 +108,7 @@ pub async fn read_seed_batch(
         };
         let data = match mode {
             PayloadMode::Signal => json!({"op": "insert", "signal": true}),
-            PayloadMode::Full => json!({"op": "insert", "after": document_to_json_owned(doc)}),
+            PayloadMode::Full => document_image(&doc).row_data("insert", "after"),
         };
         events.push(CloudEvent::row_change(
             source_id,

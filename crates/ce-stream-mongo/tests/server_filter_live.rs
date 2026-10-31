@@ -128,12 +128,7 @@ impl Capture {
                         .or_else(|| data.get("before"))
                         .cloned()
                         .unwrap_or_default();
-                    let id = &doc["_id"];
-                    let id = id
-                        .as_i64()
-                        .or_else(|| id["$numberInt"].as_str().and_then(|n| n.parse().ok()))
-                        .or_else(|| id["$numberLong"].as_str().and_then(|n| n.parse().ok()))
-                        .unwrap_or(-1);
+                    let id = doc["_id"].as_i64().unwrap_or(-1);
                     (collection, id)
                 })
                 .collect();

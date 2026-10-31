@@ -306,8 +306,14 @@ mod tests {
                 coll: Some(coll.into()),
                 to_db: None,
                 to_coll: None,
-                document_key: Some(json!({"_id": {"$oid": "aabbccddeeff001122334455"}})),
-                full_document: Some(json!({"_id": 1})),
+                document_key: Some(crate::bson_json::Image {
+                    value: json!({"_id": "aabbccddeeff001122334455"}),
+                    types: Some(json!({"_id": "objectId"})),
+                }),
+                full_document: Some(crate::bson_json::Image {
+                    value: json!({"_id": 1}),
+                    types: None,
+                }),
                 txn_key: txn.map(str::to_string),
                 resume_token: json!({"_data": token}),
                 cluster_time: Some(ClusterTime { t: 1, i: 1 }),

@@ -20,7 +20,7 @@ use mongodb::options::FullDocumentType;
 use mongodb::{Client, Database};
 use serde_json::Value;
 
-use crate::bson_json::{document_to_json, document_to_json_owned};
+use crate::bson_json::{document_image, identity_text};
 use crate::checkpoint::{ClusterTime, MongoCheckpoint};
 use crate::gate::validate_capture_gates;
 use crate::group::{Emit, TxnGrouper};
@@ -442,7 +442,7 @@ fn raw_change(event: ChangeStreamEvent<Document>) -> Result<RawChange> {
         i: ts.increment,
     });
     let txn_key = match (&event.lsid, event.txn_number) {
-        (Some(lsid), Some(n)) => Some(format!("{}:{n}", document_to_json(lsid))),
+        (Some(lsid), Some(n)) => Some(format!("{}:{n}", identity_text(lsid))),
         _ => None,
     };
     let (db, coll) = match &event.ns {
@@ -469,8 +469,8 @@ fn raw_change(event: ChangeStreamEvent<Document>) -> Result<RawChange> {
         coll,
         to_db,
         to_coll,
-        document_key: event.document_key.as_ref().map(document_to_json),
-        full_document: event.full_document.map(document_to_json_owned),
+        document_key: event.document_key.as_ref().map(document_image),
+        full_document: event.full_document.as_ref().map(document_image),
         txn_key,
         resume_token,
         cluster_time,
