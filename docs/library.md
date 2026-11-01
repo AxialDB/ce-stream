@@ -137,7 +137,7 @@ cut.wait_settled(&mark).await?;
 # }
 ```
 
-`MysqlSeedCut` reads `gtid_executed`, and its `wait_settled` returns at once, since a GTID set names finished transactions.
+`MysqlSeedCut` reads `gtid_executed` on the server you copy from, and `log_replica_updates`, `server_uuid`, and `gtid_purged` on the server the stream reads, which can be a replica. The mark's `at` leaves out what the stream's server has purged, since it cannot arrive, and its `after` is the whole set. When `log_replica_updates` is off and the set names another server, `mark` is an error: that binlog does not hold the rows. `wait_settled` returns at once, since a GTID set names finished transactions.
 
 ## PostgreSQL
 

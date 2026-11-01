@@ -36,8 +36,11 @@ use tracing::info;
 
 pub use ddl::DDL_CE_TYPE;
 pub use dispatch::{deliver_committed, deliver_progress, DeliverCtx};
-pub use gate::validate_capture_gates;
-pub use gtid::{commit_gtid, commit_gtid_set_after, commit_position, covers_position, ExecutedSet};
+pub use gate::{validate_capture_gates, CaptureServer};
+pub use gtid::{
+    commit_gtid, commit_gtid_set_after, commit_position, covers_position, seed_cut_position,
+    subtract_gtid_sets, ExecutedSet,
+};
 pub use map::column_value_to_json;
 pub use txn_buffer::TxnBuffer;
 
@@ -91,22 +94,22 @@ pub fn new_confirm() -> Confirm {
     Confirm::new(gtid::ADAPTER, covers_position)
 }
 
-/// The seed cut on MySQL, on the consumer's connection details and account: a
-/// GTID set names finished transactions, so there is nothing to wait for.
+/// The seed cut on MySQL: a GTID set names finished transactions, so there is
+/// nothing to wait for. See [`gtid::seed_cut_position`].
 pub struct MysqlSeedCut {
-    pub options: MysqlSourceOptions,
+    /// The server the seed is copied from, on the consumer's account.
+    pub seed: MysqlSourceOptions,
+    /// The server the stream reads. Another one when the stream reads a replica.
+    pub capture: MysqlSourceOptions,
 }
 
 #[async_trait]
 impl SeedCut for MysqlSeedCut {
     async fn mark(&self) -> Result<SourcePosition> {
-        let url = self.options.connection_url();
-        let set = gate::fetch_global_gtid(&url, "gtid_executed").await?;
-        Ok(SourcePosition {
-            adapter: gtid::ADAPTER.into(),
-            at: serde_json::json!({ "gtid": set }),
-            after: serde_json::json!({ "gtid": set }),
-        })
+        let executed =
+            gate::fetch_global_gtid(&self.seed.connection_url(), "gtid_executed").await?;
+        let capture = gate::fetch_capture_server(&self.capture.connection_url()).await?;
+        gtid::seed_cut_position(&executed, &capture)
     }
 
     async fn wait_settled(&self, _mark: &SourcePosition) -> Result<()> {

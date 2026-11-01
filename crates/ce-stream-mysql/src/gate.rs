@@ -104,10 +104,54 @@ pub async fn fetch_global_gtid(url: &str, variable: &str) -> Result<String> {
         .await
         .map_err(|e| Error::Source(format!("gtid variable query: {e}")))?;
 
-    rows.into_iter()
+    let set = rows
+        .into_iter()
         .next()
         .and_then(|row| row.values.into_iter().next())
-        .ok_or_else(|| Error::Source(format!("gtid variable {variable}: empty result")))
+        .ok_or_else(|| Error::Source(format!("gtid variable {variable}: empty result")))?;
+    // MySQL breaks a long set into lines.
+    Ok(set.split_whitespace().collect())
+}
+
+/// What a seed cut has to know of the server the stream reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureServer {
+    pub server_uuid: String,
+    /// Are replicated transactions written to this server's binlog?
+    pub log_replica_updates: bool,
+    pub gtid_purged: String,
+}
+
+/// Read [`CaptureServer`] in one statement.
+pub async fn fetch_capture_server(url: &str) -> Result<CaptureServer> {
+    let mut authenticator = Authenticator::new(url, 30, None)
+        .map_err(|e| Error::Source(format!("capture server connect: {e}")))?;
+    let mut channel = authenticator
+        .connect()
+        .await
+        .map_err(|e| Error::Source(format!("capture server connect: {e}")))?;
+    let rows = CommandUtil::execute_query(
+        &mut channel,
+        "SELECT @@GLOBAL.server_uuid, @@GLOBAL.log_replica_updates, @@GLOBAL.gtid_purged",
+    )
+    .await
+    .map_err(|e| Error::Source(format!("capture server query: {e}")))?;
+    let mut values = rows
+        .into_iter()
+        .next()
+        .map(|row| row.values)
+        .unwrap_or_default()
+        .into_iter();
+    let mut next = || {
+        values
+            .next()
+            .ok_or_else(|| Error::Source("capture server query: a short result".into()))
+    };
+    Ok(CaptureServer {
+        server_uuid: next()?,
+        log_replica_updates: next()? == "1",
+        gtid_purged: next()?.split_whitespace().collect(),
+    })
 }
 
 /// Connect and validate MySQL server settings for ROW binlog capture.
