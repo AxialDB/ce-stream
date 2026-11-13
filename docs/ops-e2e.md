@@ -50,6 +50,7 @@ tls = true
 # tls_ca = "ca.pem"             # verifies the certificate and name; without it, TLS only encrypts
 slot = "ce_stream_app"
 create_slot = true              # otherwise a missing slot is an error
+# failover = false             # 17: mark the slot for failover; a standby with sync_replication_slots keeps a copy
 # publication = "ce_stream"     # the default
 # min_server_version = "17"     # the default
 # message_prefixes = []         # logical messages to deliver

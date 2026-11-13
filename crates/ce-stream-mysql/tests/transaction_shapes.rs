@@ -55,6 +55,7 @@ fn table_map() -> EventData {
 
 fn write_rows(n: usize) -> EventData {
     EventData::WriteRows(WriteRowsEvent {
+        partition_id: None,
         table_id: 1,
         included_columns: vec![true],
         rows: (0..n)

@@ -135,7 +135,11 @@ pub fn subtract_gtid_sets(from: &str, removed: &str) -> Result<String> {
 }
 
 /// Where a seed cut stands: `at` is what the stream has to deliver, `after` the
-/// whole set the seed's server has executed.
+/// whole set the seed's server has executed. `after.baseline_gtid` is what a
+/// checkpoint made from the cut holds: the whole set and what the stream's
+/// server had purged at the cut, which cannot arrive and the seed stands for
+/// (a replica's own transactions, the primary never ran). A resume that finds
+/// a purge outside it is [`Error::HistoryLost`].
 ///
 /// A transaction the stream's server purged cannot arrive, so it is left out of
 /// `at`. With `log_replica_updates` off that server's binlog holds nothing it
@@ -160,7 +164,10 @@ pub fn seed_cut_position(seed_executed: &str, capture: &CaptureServer) -> Result
     Ok(SourcePosition {
         adapter: ADAPTER.into(),
         at: serde_json::json!({ "gtid": subtract_gtid_sets(seed_executed, &capture.gtid_purged)? }),
-        after: serde_json::json!({ "gtid": seed_executed }),
+        after: serde_json::json!({
+            "gtid": seed_executed,
+            "baseline_gtid": union_gtid_sets(&[seed_executed, &capture.gtid_purged])?,
+        }),
     })
 }
 
@@ -201,17 +208,59 @@ impl ExecutedSet {
         Ok(snapshot.to_set_string())
     }
 
-    /// GTID set for COM_BINLOG_DUMP_GTID: purged history + connect baseline + checkpoint watermark.
+    /// GTID set for COM_BINLOG_DUMP_GTID: what the consumer holds, the
+    /// checkpoint's watermark and its connect baseline.
+    ///
+    /// The baseline holds everything the server had executed when the consumer
+    /// first connected, so a transaction purged before that is in it. A
+    /// transaction the server purged that is in neither is one the consumer
+    /// never received: it can no longer arrive, and the answer is
+    /// [`Error::HistoryLost`] with the missing set, not a resume that skips it.
+    ///
+    /// A checkpoint with no baseline (written before 0.2.0) cannot tell what
+    /// was purged before it started from what it missed: it keeps the old
+    /// handshake, which adds the purged set, and the caller warns.
     pub fn binlog_handshake_gtid_set(
         checkpoint_gtid: &str,
         baseline_gtid: Option<&str>,
         gtid_purged: &str,
     ) -> Result<String> {
-        if let Some(baseline) = baseline_gtid.filter(|s| !s.is_empty()) {
-            return union_gtid_sets(&[gtid_purged, baseline, checkpoint_gtid]);
+        if let Some(baseline) = baseline_gtid.filter(|s| !s.trim().is_empty()) {
+            let held = union_gtid_sets(&[baseline, checkpoint_gtid])?;
+            let missing = subtract_gtid_sets(gtid_purged, &held)?;
+            if !missing.trim().is_empty() {
+                return Err(Error::HistoryLost(format!(
+                    "the server has purged binary logs holding transactions this checkpoint never received: {missing}"
+                )));
+            }
+            return Ok(held);
         }
         legacy_handshake_without_baseline(checkpoint_gtid, gtid_purged)
     }
+}
+
+/// The transactions a server with `gtid_purged` can no longer send to a
+/// consumer at this checkpoint: purged, and in neither the checkpoint's set
+/// nor its baseline. Empty when the server can serve it. A checkpoint with no
+/// baseline cannot be judged, and is answered empty (see
+/// [`ExecutedSet::binlog_handshake_gtid_set`]).
+pub fn purged_missing(
+    checkpoint_gtid: &str,
+    baseline_gtid: Option<&str>,
+    gtid_purged: &str,
+) -> Result<String> {
+    let Some(baseline) = baseline_gtid.filter(|s| !s.trim().is_empty()) else {
+        return Ok(String::new());
+    };
+    let held = union_gtid_sets(&[baseline, checkpoint_gtid])?;
+    subtract_gtid_sets(gtid_purged, &held)
+}
+
+/// MySQL refuses a dump whose set lacks transactions it purged (error 1236).
+/// The error packet's text is the only sign the reader gets.
+pub fn is_purged_refusal(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("purged") && (lower.contains("binary log") || lower.contains("gtid"))
 }
 
 /// Union GTID set strings (interval merge per server UUID).
@@ -344,6 +393,25 @@ mod tests {
         assert_eq!(at_of(&cut), format!("{B}:1-50"));
         assert_eq!(cut.after["gtid"].as_str().unwrap(), executed);
         assert!(covers_position(&set_position(&format!("{B}:1-50")), &cut).unwrap());
+    }
+
+    /// A replica's own transactions, purged there, are in the baseline a
+    /// checkpoint from the cut holds: a resume on it is no loss.
+    #[test]
+    fn a_cut_s_baseline_holds_what_the_stream_s_server_purged() {
+        let executed = format!("{A}:1-100");
+        let cut = seed_cut_position(&executed, &capture(B, true, &format!("{A}:1-40,{B}:1-3")))
+            .unwrap();
+        let baseline = cut.after["baseline_gtid"].as_str().unwrap();
+        assert_eq!(
+            purged_missing(&executed, Some(baseline), &format!("{A}:1-40,{B}:1-3")).unwrap(),
+            ""
+        );
+        assert_ne!(
+            purged_missing(&executed, Some(&executed), &format!("{A}:1-40,{B}:1-3")).unwrap(),
+            "",
+            "without it the replica's own purge reads as a loss"
+        );
     }
 
     /// A stray local write on a replica does not end the wait for what it applies.
@@ -480,5 +548,87 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, format!("{uuid}:1-4105"));
+    }
+
+    const PA: &str = "49b103aa-6814-11f1-aab9-144fd7d9c421";
+    const PB: &str = "5c2f0d1e-6814-11f1-aab9-144fd7d9c421";
+
+    /// Purged inside what the checkpoint holds: the set sent is the
+    /// checkpoint's own, with nothing added.
+    #[test]
+    fn a_purge_inside_the_checkpoint_resumes_on_its_own_set() {
+        let out = ExecutedSet::binlog_handshake_gtid_set(
+            &format!("{PA}:1-500"),
+            Some(&format!("{PA}:1-100")),
+            &format!("{PA}:1-400"),
+        )
+        .unwrap();
+        assert_eq!(out, format!("{PA}:1-500"));
+        assert_eq!(
+            purged_missing(&format!("{PA}:1-500"), Some(&format!("{PA}:1-100")), &format!("{PA}:1-400"))
+                .unwrap(),
+            ""
+        );
+    }
+
+    /// The server purged transactions the consumer never received: the lab's
+    /// engine stopped at 1-123 while the server went on and purged 1-183.
+    #[test]
+    fn a_purge_past_the_checkpoint_is_history_lost() {
+        let err = ExecutedSet::binlog_handshake_gtid_set(
+            &format!("{PA}:1-123"),
+            Some(&format!("{PA}:1-100")),
+            &format!("{PA}:1-183"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::HistoryLost(_)), "{err}");
+        assert!(err.to_string().contains(&format!("{PA}:124-183")), "{err}");
+        assert_eq!(
+            purged_missing(&format!("{PA}:1-123"), Some(&format!("{PA}:1-100")), &format!("{PA}:1-183"))
+                .unwrap(),
+            format!("{PA}:124-183")
+        );
+    }
+
+    /// A replica's own transactions, purged before the consumer started, are
+    /// in its baseline (the engine puts them there at a seed): no loss.
+    #[test]
+    fn another_servers_purge_inside_the_baseline_is_no_loss() {
+        let checkpoint = format!("{PA}:1-900");
+        let baseline = format!("{PA}:1-800,{PB}:1-5");
+        let purged = format!("{PA}:1-850,{PB}:1-5");
+        let out =
+            ExecutedSet::binlog_handshake_gtid_set(&checkpoint, Some(&baseline), &purged).unwrap();
+        assert_eq!(
+            GtidSet::new(&out).unwrap().to_string(),
+            GtidSet::new(&format!("{PA}:1-900,{PB}:1-5")).unwrap().to_string()
+        );
+    }
+
+    /// Before 0.2.0 a checkpoint had no baseline: the old handshake, which
+    /// cannot tell a loss, and no answer from `purged_missing`.
+    #[test]
+    fn a_checkpoint_with_no_baseline_keeps_the_old_handshake() {
+        let out =
+            ExecutedSet::binlog_handshake_gtid_set(&format!("{PA}:1-123"), None, &format!("{PA}:1-183"))
+                .unwrap();
+        assert_eq!(out, format!("{PA}:1-183"));
+        assert_eq!(
+            purged_missing(&format!("{PA}:1-123"), None, &format!("{PA}:1-183")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_servers_purge_refusal_is_recognised() {
+        assert!(is_purged_refusal(
+            "connect mysql failed: Cannot replicate because the source purged required binary logs. \
+             Replicate the missing transactions from elsewhere, or provision a new replica from backup."
+        ));
+        assert!(is_purged_refusal(
+            "connect mysql failed: The slave is connecting using CHANGE MASTER TO MASTER_AUTO_POSITION = 1, \
+             but the master has purged binary logs containing GTIDs that the slave requires."
+        ));
+        assert!(!is_purged_refusal("binlog read: connection reset by peer"));
     }
 }

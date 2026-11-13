@@ -38,9 +38,29 @@ pub use ddl::DDL_CE_TYPE;
 pub use dispatch::{deliver_committed, deliver_progress, DeliverCtx};
 pub use gate::{validate_capture_gates, CaptureServer};
 pub use gtid::{
-    commit_gtid, commit_gtid_set_after, commit_position, covers_position, seed_cut_position,
-    subtract_gtid_sets, ExecutedSet,
+    commit_gtid, commit_gtid_set_after, commit_position, covers_position, is_purged_refusal,
+    purged_missing, seed_cut_position, subtract_gtid_sets, union_gtid_sets, ExecutedSet,
 };
+
+/// What the server at `options` can no longer send to a consumer at this
+/// checkpoint: transactions it has purged that the checkpoint holds in
+/// neither its `gtid` nor its `baseline_gtid`. Empty when it can serve it, as
+/// when the checkpoint has no baseline (it cannot be judged). A consumer with
+/// several servers asks each before it starts a stream; a stream started on a
+/// server that cannot serve is [`Error::HistoryLost`].
+pub async fn server_missing(options: &MysqlSourceOptions, checkpoint: &Checkpoint) -> Result<String> {
+    let text = |key: &str| {
+        checkpoint
+            .payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (gtid, baseline) = (text("gtid"), text("baseline_gtid"));
+    let purged = gate::fetch_global_gtid(&options.connection_url(), "gtid_purged").await?;
+    purged_missing(&gtid, Some(baseline.as_str()), &purged)
+}
 pub use map::column_value_to_json;
 pub use txn_buffer::TxnBuffer;
 
@@ -170,7 +190,20 @@ impl MysqlBinlogSource {
         let baseline = cp.payload.get("baseline_gtid").and_then(|v| v.as_str());
         let url = self.options.connection_url();
         let purged = gate::fetch_global_gtid(&url, "gtid_purged").await?;
-        let handshake = ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)?;
+        if baseline.is_none_or(|s| s.trim().is_empty()) {
+            tracing::warn!(
+                "resuming from a checkpoint with no baseline_gtid (written before 0.2.0): \
+                 transactions the server purged cannot be told from ones it never sent"
+            );
+        }
+        let handshake = ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)
+            .map_err(|err| match err {
+                Error::HistoryLost(why) => Error::HistoryLost(format!(
+                    "{}:{}: {why}",
+                    self.options.host, self.options.port
+                )),
+                other => other,
+            })?;
         info!(handshake_gtid = %handshake, "resuming binlog from checkpoint");
         Ok(StartPosition::Gtid(handshake))
     }
@@ -334,7 +367,17 @@ impl MysqlBinlogSource {
         queue_bytes.close();
         drop(rx);
         if result.is_ok() {
-            let _ = join.await;
+            // The reader's own error ends the queue too: it is the stream's
+            // answer. The server's refusal of a dump whose set lacks what it
+            // purged (error 1236) is the history lost.
+            if let Ok(Err(msg)) = join.await {
+                let at = format!("{}:{}", self.options.host, self.options.port);
+                return Err(if is_purged_refusal(&msg) {
+                    Error::HistoryLost(format!("{at}: {msg}"))
+                } else {
+                    Error::Source(msg)
+                });
+            }
         }
         // After an error the reader ends at its next event or send; the
         // caller gets the error now instead of after the server drops a dump

@@ -114,6 +114,11 @@ struct SourceSection {
     /// slot is an error: the changes since it went are gone.
     #[serde(default)]
     create_slot: bool,
+    /// PostgreSQL: mark the slot for failover (17), so a standby running
+    /// `sync_replication_slots` keeps a copy and the stream resumes on the new
+    /// primary after a promotion. For a slot on the primary.
+    #[serde(default)]
+    failover: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,13 +294,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tls: cfg.source.tls,
             tls_ca: cfg.source.tls_ca.clone(),
         };
-        if cfg.source.create_slot
-            && ce_stream_postgres::slot_figures(&options, &cfg.source.slot)
-                .await?
-                .is_none()
-        {
-            let at = ce_stream_postgres::create_slot(&options, &cfg.source.slot).await?;
-            tracing::info!(slot = %cfg.source.slot, %at, "made the replication slot");
+        let figures = ce_stream_postgres::slot_figures(&options, &cfg.source.slot).await?;
+        match figures {
+            None if cfg.source.create_slot => {
+                let at = ce_stream_postgres::create_slot(
+                    &options,
+                    &cfg.source.slot,
+                    cfg.source.failover,
+                )
+                .await?;
+                tracing::info!(slot = %cfg.source.slot, %at, failover = cfg.source.failover, "made the replication slot");
+            }
+            Some(figures) if cfg.source.failover && figures.failover != Some(true) => {
+                ce_stream_postgres::alter_slot_failover(&options, &cfg.source.slot, true).await?;
+                tracing::info!(slot = %cfg.source.slot, "marked the replication slot for failover");
+            }
+            _ => {}
         }
         let mut source = PostgresSource {
             options,

@@ -7,6 +7,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- MySQL: a resume on a server that purged binary logs the checkpoint never received is `Error::HistoryLost`. The dump used to be sent the server's `gtid_purged` too, so the server never refused and the purged transactions were skipped with no error. The server's own refusal (error 1236) is `HistoryLost` as well, and a read error of the dump ends `run` with that error instead of `Ok`.
+
+### Added
+
+- MySQL: `server_missing` and `purged_missing`, what a server can no longer send to a checkpoint.
+- MySQL: a seed cut's `after` carries `baseline_gtid`, the baseline a checkpoint made from it holds.
+
 ## [0.5.0] - 2026-10-25
 
 Long transactions in parts ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)).

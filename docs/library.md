@@ -57,6 +57,8 @@ source
 # }
 ```
 
+A MySQL row's extensions carry `gtid` and `gtidset`, and for a partitioned table `partition_id`, the partition the row is in (its place in the table's definition when it was logged, subpartitions as `partition * subpartitions + subpartition`), and on an update `source_partition_id`, the one it left. A table that is not partitioned has neither.
+
 ## Transaction mode
 
 One `Delivery` at a time, whatever the source:
@@ -139,6 +141,8 @@ cut.wait_settled(&mark).await?;
 
 `MysqlSeedCut` reads `gtid_executed` on the server you copy from, and `log_replica_updates`, `server_uuid`, and `gtid_purged` on the server the stream reads, which can be a replica. The mark's `at` leaves out what the stream's server has purged, since it cannot arrive, and its `after` is the whole set. When `log_replica_updates` is off and the set names another server, `mark` is an error: that binlog does not hold the rows. `wait_settled` returns at once, since a GTID set names finished transactions.
 
+A resume is `Error::HistoryLost` when the stream's server has purged transactions the checkpoint holds in neither its `gtid` nor its `baseline_gtid`: they can no longer arrive. The dump is sent the checkpoint's own set and baseline, with nothing added, and the server's own refusal of a dump (error 1236, on purged binary logs) is `HistoryLost` too. `server_missing(options, checkpoint)` asks a server the same question without starting a stream and returns the missing set, empty when it can serve; `purged_missing` does it over sets you already hold. A checkpoint with no `baseline_gtid` (written before 0.2.0) cannot be judged: it resumes as before, with a warning. A checkpoint made from a seed cut takes the mark's `after.baseline_gtid` as its `baseline_gtid`: the whole set and what the stream's server had purged at the cut, since those transactions cannot arrive and the seed stands for them.
+
 ## PostgreSQL
 
 The slot is yours to make and drop. A missing or invalidated slot is `Error::HistoryLost`, never a quiet new slot, and so is a checkpoint behind the slot.
@@ -161,7 +165,7 @@ let options = PostgresOptions {
     tls_ca: Some("ca.pem".into()), // without one, TLS encrypts and checks nothing
 };
 if slot_figures(&options, "app_slot").await?.is_none() {
-    create_slot(&options, "app_slot").await?;
+    create_slot(&options, "app_slot", true).await?; // true: a failover slot, for a slot on the primary
 }
 let mut source = PostgresSource {
     options,
@@ -192,6 +196,7 @@ source.run_deliveries(|_delivery| Ok(())).await
 - `TableSchema.identity` and the controls carry the relation OID, which survives a rename.
 - A row of a partition has the partition as its subject. With its parent on the include list, the row says so in the extensions `partition_root` and `partition_root_oid`.
 - A drop or a rename sends nothing on the stream. `catalog_tables` runs the query that shows them, on a connection you supply.
+- A failover slot (`create_slot(.., true)`, or `alter_slot_failover` on an existing one, before the stream starts) is copied to a standby that runs `sync_replication_slots`; `SlotFigures::failover` and `synced` show it. After a promotion the stream resumes on the new primary when the checkpoint is at or before the point where the new timeline forked from the old one; a checkpoint past that point is `Error::Checkpoint`, and `fork_point` gives the embedder that point to compare with what it applied. A server on an older timeline than the checkpoint's (an old primary) is refused.
 - The embedder installs a `rustls` crypto provider before connecting with TLS.
 
 ## Live include list

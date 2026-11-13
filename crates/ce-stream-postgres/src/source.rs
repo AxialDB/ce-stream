@@ -81,19 +81,101 @@ fn stored_checkpoint(checkpoint: &Checkpoint) -> Result<Stored> {
     })
 }
 
-/// A checkpoint from another server is its own error: the LSN means nothing there.
-fn check_same_server(stored: &Stored, system_id: &str, timeline: &str) -> Result<()> {
+/// How a stored checkpoint's timeline relates to the server's.
+#[derive(Debug, PartialEq, Eq)]
+enum Timelines {
+    Same,
+    /// The server is on a later timeline: a promotion happened since the
+    /// checkpoint. The checkpoint holds when it is at or before the point
+    /// where the server's timeline forked from the checkpoint's.
+    ServerLater {
+        stored: u32,
+        server: u32,
+    },
+}
+
+/// A checkpoint from another server is its own error: the LSN means nothing
+/// there. A server on an older timeline than the checkpoint's is one too: an
+/// old primary, whose history the checkpoint has left.
+fn check_same_server(stored: &Stored, system_id: &str, timeline: &str) -> Result<Timelines> {
     if let Some(id) = stored.system_id.as_deref().filter(|id| *id != system_id) {
         return Err(Error::Checkpoint(format!(
             "the checkpoint is of system {id} and this server is {system_id}; the position means nothing here"
         )));
     }
-    if let Some(line) = stored.timeline.as_deref().filter(|line| *line != timeline) {
-        return Err(Error::Checkpoint(format!(
+    let Some(line) = stored.timeline.as_deref().filter(|line| *line != timeline) else {
+        return Ok(Timelines::Same);
+    };
+    match (line.parse::<u32>(), timeline.parse::<u32>()) {
+        (Ok(stored_tli), Ok(server_tli)) if stored_tli < server_tli => Ok(Timelines::ServerLater {
+            stored: stored_tli,
+            server: server_tli,
+        }),
+        (Ok(_), Ok(_)) => Err(Error::Checkpoint(format!(
+            "the checkpoint is on timeline {line} and this server is on the older timeline {timeline}: an old primary, whose history the checkpoint has left"
+        ))),
+        _ => Err(Error::Checkpoint(format!(
             "the checkpoint is on timeline {line} and this server is on {timeline}; the position may not exist on this history"
-        )));
+        ))),
     }
-    Ok(())
+}
+
+/// Where timeline `from` ended, from the history file of the later timeline
+/// `history_of`: the switch point of the line that names `from`.
+fn fork_point_in_history(content: &str, history_of: u32, from: u32) -> Result<Lsn> {
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(tli), Some(lsn)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if tli.parse::<u32>().ok() == Some(from) {
+            return Lsn::parse(lsn);
+        }
+    }
+    Err(Error::Checkpoint(format!(
+        "the history of timeline {history_of} does not say where timeline {from} ended"
+    )))
+}
+
+async fn fork_point_on(conn: &mut Connection, history_of: u32, from: u32) -> Result<Lsn> {
+    let rows = conn
+        .query(&format!("TIMELINE_HISTORY {history_of}"))
+        .await?;
+    let content = rows
+        .first()
+        .and_then(|row| row.get(1))
+        .and_then(Option::as_deref)
+        .ok_or_else(|| Error::Source("TIMELINE_HISTORY returned no content".into()))?;
+    fork_point_in_history(content, history_of, from)
+}
+
+/// The server's system identifier and current timeline (`IDENTIFY_SYSTEM`),
+/// for an embedder that has to compare a checkpoint with a promoted server.
+pub async fn server_identity(options: &PostgresOptions) -> Result<(String, u32)> {
+    let mut conn = Connection::connect(options, true).await?;
+    let identity = conn.query("IDENTIFY_SYSTEM").await?;
+    match identity.first().map(Vec::as_slice) {
+        Some([Some(id), Some(line), ..]) => {
+            let timeline = line
+                .parse()
+                .map_err(|_| Error::Source(format!("IDENTIFY_SYSTEM timeline {line:?}")))?;
+            Ok((id.clone(), timeline))
+        }
+        _ => Err(Error::Source("IDENTIFY_SYSTEM returned no row".into())),
+    }
+}
+
+/// Where timeline `from` ended on the server's history: the point where the
+/// later timeline `history_of` forked from it. An embedder compares it with the
+/// position of the last change it applied: a change past it was on the old
+/// primary only and is not on this server.
+pub async fn fork_point(options: &PostgresOptions, history_of: u32, from: u32) -> Result<Lsn> {
+    fork_point_on(
+        &mut Connection::connect(options, true).await?,
+        history_of,
+        from,
+    )
+    .await
 }
 
 /// `wal_sender_timeout` in milliseconds to the time between status updates.
@@ -360,7 +442,26 @@ impl PostgresSource {
             .map(stored_checkpoint)
             .transpose()?;
         if let Some(stored) = &stored {
-            check_same_server(stored, &system_id, &timeline)?;
+            if let Timelines::ServerLater {
+                stored: from,
+                server,
+            } = check_same_server(stored, &system_id, &timeline)?
+            {
+                let fork = fork_point_on(&mut conn, server, from).await?;
+                if stored.lsn > fork {
+                    return Err(Error::Checkpoint(format!(
+                        "the checkpoint at {} is past {fork}, where timeline {server} forked from timeline {from}: what follows it was on the old primary only",
+                        stored.lsn
+                    )));
+                }
+                tracing::info!(
+                    checkpoint = %stored.lsn,
+                    %fork,
+                    from,
+                    server,
+                    "resuming on a later timeline"
+                );
+            }
         }
 
         let slot = &self.stream.slot;
@@ -597,12 +698,52 @@ mod tests {
             json!({ "lsn": "0/10", "system_id": "1", "timeline": "1" }),
         ))
         .unwrap();
-        assert!(check_same_server(&stored, "1", "1").is_ok());
+        assert_eq!(
+            check_same_server(&stored, "1", "1").unwrap(),
+            Timelines::Same
+        );
         let other = check_same_server(&stored, "2", "1").unwrap_err();
         assert!(matches!(other, Error::Checkpoint(_)));
         assert!(other.to_string().contains("system"));
-        let other = check_same_server(&stored, "1", "2").unwrap_err();
-        assert!(other.to_string().contains("timeline"));
+    }
+
+    #[test]
+    fn a_later_timeline_is_a_promotion_and_an_older_one_an_old_primary() {
+        let stored = stored_checkpoint(&checkpoint(
+            json!({ "lsn": "0/10", "system_id": "1", "timeline": "2" }),
+        ))
+        .unwrap();
+        assert_eq!(
+            check_same_server(&stored, "1", "3").unwrap(),
+            Timelines::ServerLater {
+                stored: 2,
+                server: 3
+            }
+        );
+        let older = check_same_server(&stored, "1", "1").unwrap_err();
+        assert!(older.to_string().contains("old primary"), "{older}");
+        let odd = check_same_server(&stored, "1", "x").unwrap_err();
+        assert!(odd.to_string().contains("timeline"));
+    }
+
+    #[test]
+    fn the_fork_point_is_where_the_history_says_the_old_timeline_ended() {
+        // A history file of timeline 3: timeline 1 ended at 0/3000000 and
+        // timeline 2 at 0/5000028.
+        let history = "1\t0/3000000\tno recovery target specified\n\n2\t0/5000028\tno recovery target specified\n";
+        assert_eq!(
+            fork_point_in_history(history, 3, 1).unwrap(),
+            Lsn(0x3000000)
+        );
+        assert_eq!(
+            fork_point_in_history(history, 3, 2).unwrap(),
+            Lsn(0x5000028)
+        );
+        let missing = fork_point_in_history(history, 3, 3).unwrap_err();
+        assert!(
+            missing.to_string().contains("timeline 3 ended"),
+            "{missing}"
+        );
     }
 
     #[test]

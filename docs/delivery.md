@@ -62,6 +62,8 @@ With `checkpoint = "on_confirm"` step 2 waits for the consumer's `Confirm::confi
 
 If the process crashes after a successful HTTP POST but before the checkpoint, the same commit may be delivered again after restart. Consumers should be **idempotent** (dedupe on business key and/or CloudEvent `id`, `gtid`, or `lsn`).
 
+**MySQL's purged binary logs.** A resume on a server that purged a transaction the checkpoint never received is `HistoryLost`, never a dump that skips it.
+
 **PostgreSQL's slot.** The server forgets what lies behind the slot, so the slot moves only to a checkpoint that has reached the disk, at most once a second. It never moves past what a restart would read. A checkpoint behind its slot is `HistoryLost`, as is a missing or invalidated slot, and one from another system or timeline is its own error.
 
 ## What we do not claim

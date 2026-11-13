@@ -59,18 +59,30 @@ pub(crate) fn dispatch_binlog_event(
             ctx,
             e.table_id,
             ChangeOp::Insert,
+            Partitions {
+                id: e.partition_id,
+                source: None,
+            },
             e.rows.iter().map(|r| (None, Some(r))),
         )?,
         EventData::UpdateRows(e) => buffer_rows(
             ctx,
             e.table_id,
             ChangeOp::Update,
+            Partitions {
+                id: e.partition_id,
+                source: e.source_partition_id,
+            },
             e.rows.iter().map(|(b, a)| (Some(b), Some(a))),
         )?,
         EventData::DeleteRows(e) => buffer_rows(
             ctx,
             e.table_id,
             ChangeOp::Delete,
+            Partitions {
+                id: e.partition_id,
+                source: None,
+            },
             e.rows.iter().map(|r| (Some(r), None)),
         )?,
         EventData::Xid(_) => flush_commit(ctx)?,
@@ -324,11 +336,22 @@ fn start_set(executed: &Arc<Mutex<ExecutedSet>>) -> ce_stream_core::error::Resul
     ExecutedSet::from_set_string(&executed.blocking_lock().to_set_string())
 }
 
+/// The partition information of a rows event (MySQL 8.0 and later, for a
+/// partitioned table): the partition the rows are in, and for an update the
+/// one they left. Delivered as the extensions `partition_id` and
+/// `source_partition_id`; absent for a table that is not partitioned.
+#[derive(Debug, Clone, Copy, Default)]
+struct Partitions {
+    id: Option<u16>,
+    source: Option<u16>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn buffer_rows<'a, I>(
     ctx: &mut BinlogDispatchCtx<'_>,
     table_id: u64,
     op: ChangeOp,
+    partitions: Partitions,
     rows: I,
 ) -> std::result::Result<(), String>
 where
@@ -406,6 +429,15 @@ where
             extensions.insert(
                 "gtidset".into(),
                 serde_json::Value::String(gtid_set.clone()),
+            );
+        }
+        if let Some(partition) = partitions.id {
+            extensions.insert("partition_id".into(), serde_json::Value::from(partition));
+        }
+        if let Some(source) = partitions.source {
+            extensions.insert(
+                "source_partition_id".into(),
+                serde_json::Value::from(source),
             );
         }
 

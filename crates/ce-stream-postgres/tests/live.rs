@@ -98,7 +98,7 @@ async fn fresh(name: &str) -> PostgresStreamOptions {
          ALTER TABLE {table} REPLICA IDENTITY FULL;
          CREATE PUBLICATION {table} FOR TABLE {table};"
     ));
-    create_slot(&stream_account(), &slot).await.unwrap();
+    create_slot(&stream_account(), &slot, false).await.unwrap();
     PostgresStreamOptions {
         slot,
         publication: table,

@@ -34,6 +34,7 @@ fn sample_table_map() -> TableMapEvent {
 
 fn sample_write_rows(table_id: u64, n: usize) -> WriteRowsEvent {
     WriteRowsEvent {
+        partition_id: None,
         table_id,
         included_columns: vec![true, true],
         rows: (0..n)

@@ -20,6 +20,14 @@ pub struct SlotFigures {
     pub confirmed_flush_lsn: Option<String>,
     pub conflicting: Option<bool>,
     pub invalidation_reason: Option<String>,
+    /// The slot is marked for failover: a standby running
+    /// `sync_replication_slots` keeps a copy of it (PostgreSQL 17).
+    #[serde(default)]
+    pub failover: Option<bool>,
+    /// On a standby: this slot is a synced copy of the primary's. Only a
+    /// persistent slot that was synced before a promotion can be used after it.
+    #[serde(default)]
+    pub synced: Option<bool>,
 }
 
 impl SlotFigures {
@@ -47,7 +55,9 @@ pub(crate) fn figures_sql(slot: &str) -> String {
             'safe_wal_size', safe_wal_size,
             'confirmed_flush_lsn', confirmed_flush_lsn::text,
             'conflicting', conflicting,
-            'invalidation_reason', invalidation_reason)::text
+            'invalidation_reason', invalidation_reason,
+            'failover', failover,
+            'synced', synced)::text
          FROM pg_replication_slots WHERE slot_name = {}",
         quote_literal(slot)
     )
@@ -70,22 +80,47 @@ pub async fn slot_figures(options: &PostgresOptions, slot: &str) -> Result<Optio
     read_figures(&mut Connection::connect(options, false).await?, slot).await
 }
 
+pub(crate) fn create_slot_command(slot: &str, failover: bool) -> String {
+    format!(
+        "CREATE_REPLICATION_SLOT {} LOGICAL pgoutput (SNAPSHOT 'nothing'{})",
+        quote_ident(slot),
+        if failover { ", FAILOVER true" } else { "" }
+    )
+}
+
 /// Make a logical slot. The stream starts at the LSN returned. On a standby this
 /// waits until `pg_log_standby_snapshot()` runs on the primary.
-pub async fn create_slot(options: &PostgresOptions, slot: &str) -> Result<Lsn> {
+///
+/// With `failover` the slot is marked for failover (PostgreSQL 17): a standby
+/// that runs `sync_replication_slots` keeps a copy, and after a promotion the
+/// stream resumes on the new primary from that copy. The option is for a slot
+/// on the primary; a slot made on a standby is synced nowhere.
+pub async fn create_slot(options: &PostgresOptions, slot: &str, failover: bool) -> Result<Lsn> {
     let mut conn = Connection::connect(options, true).await?;
-    let rows = conn
-        .query(&format!(
-            "CREATE_REPLICATION_SLOT {} LOGICAL pgoutput (SNAPSHOT 'nothing')",
-            quote_ident(slot)
-        ))
-        .await?;
+    let rows = conn.query(&create_slot_command(slot, failover)).await?;
     let point = rows
         .first()
         .and_then(|row| row.get(1))
         .and_then(Option::as_deref)
         .ok_or_else(|| Error::Source("CREATE_REPLICATION_SLOT returned no position".into()))?;
     Lsn::parse(point)
+}
+
+/// Mark an existing slot for failover, or unmark it (PostgreSQL 17,
+/// `ALTER_REPLICATION_SLOT`). Done before the stream starts, since the server
+/// refuses it while the slot is active.
+pub async fn alter_slot_failover(
+    options: &PostgresOptions,
+    slot: &str,
+    failover: bool,
+) -> Result<()> {
+    let mut conn = Connection::connect(options, true).await?;
+    conn.query(&format!(
+        "ALTER_REPLICATION_SLOT {} (FAILOVER {failover})",
+        quote_ident(slot)
+    ))
+    .await?;
+    Ok(())
 }
 
 pub async fn drop_slot(options: &PostgresOptions, slot: &str) -> Result<()> {
@@ -109,6 +144,8 @@ mod tests {
             confirmed_flush_lsn: Some("0/10".into()),
             conflicting: Some(false),
             invalidation_reason: None,
+            failover: Some(false),
+            synced: Some(false),
         }
     }
 
@@ -124,5 +161,25 @@ mod tests {
         let mut lost = figures();
         lost.invalidation_reason = Some("idle_timeout".into());
         assert!(lost.lost_because().unwrap().contains("idle_timeout"));
+    }
+
+    #[test]
+    fn figures_without_the_failover_columns_still_read() {
+        let figures: SlotFigures =
+            serde_json::from_str(r#"{"slot_name":"s","active":true}"#).unwrap();
+        assert_eq!(figures.failover, None);
+        assert_eq!(figures.synced, None);
+    }
+
+    #[test]
+    fn the_create_command_asks_for_failover_only_when_told() {
+        assert_eq!(
+            create_slot_command("s", false),
+            "CREATE_REPLICATION_SLOT \"s\" LOGICAL pgoutput (SNAPSHOT 'nothing')"
+        );
+        assert_eq!(
+            create_slot_command("my slot", true),
+            "CREATE_REPLICATION_SLOT \"my slot\" LOGICAL pgoutput (SNAPSHOT 'nothing', FAILOVER true)"
+        );
     }
 }
