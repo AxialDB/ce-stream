@@ -9,6 +9,7 @@ use ce_stream_core::event::{ChangeOp, CloudEvent, PayloadMode, TableRef};
 use ce_stream_core::transaction::{ControlEvent, ControlKind};
 use serde_json::{json, Value};
 
+use crate::bson_json::Image;
 use crate::checkpoint::ClusterTime;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -18,8 +19,8 @@ pub struct RawChange {
     pub coll: Option<String>,
     pub to_db: Option<String>,
     pub to_coll: Option<String>,
-    pub document_key: Option<Value>,
-    pub full_document: Option<Value>,
+    pub document_key: Option<Image>,
+    pub full_document: Option<Image>,
     pub txn_key: Option<String>,
     pub resume_token: Value,
     pub cluster_time: Option<ClusterTime>,
@@ -61,23 +62,23 @@ pub fn map_change(raw: RawChange, source_id: &str, mode: PayloadMode) -> Incomin
             row_effect(&raw, source_id, mode)
         }
         ChangeOpKind::Delete => delete_effect(&raw, source_id, mode),
-        ChangeOpKind::Drop => control_effect(&raw, ControlKind::Dropped, None),
+        ChangeOpKind::Drop => control_effect(&raw, ControlKind::Dropped),
         ChangeOpKind::Rename => {
             let to = TableRef::new(
                 raw.to_db.clone().unwrap_or_else(|| raw.db.clone()),
                 raw.to_coll.clone().unwrap_or_default(),
             );
-            control_effect(&raw, ControlKind::Renamed, Some(to))
+            control_effect(&raw, ControlKind::Renamed { to })
         }
         ChangeOpKind::DropDatabase => Effect::Control(ControlEvent {
             kind: ControlKind::DatabaseDropped,
             subject: TableRef::new(&raw.db, ""),
-            renamed_to: None,
+            identity: None,
         }),
         ChangeOpKind::Invalidate => Effect::Control(ControlEvent {
             kind: ControlKind::Invalidated,
             subject: TableRef::new(&raw.db, raw.coll.clone().unwrap_or_default()),
-            renamed_to: None,
+            identity: None,
         }),
         ChangeOpKind::Other => Effect::Filtered,
     };
@@ -105,11 +106,11 @@ fn row_effect(raw: &RawChange, source_id: &str, mode: PayloadMode) -> Effect {
     let data = match mode {
         PayloadMode::Signal => json!({"op": op.as_str(), "signal": true}),
         PayloadMode::Full => {
-            let Some(after) = raw.full_document.clone() else {
+            let Some(after) = raw.full_document.as_ref() else {
                 // updateLookup can miss. A later delete converges. Required mode errors on the server.
                 return Effect::Filtered;
             };
-            json!({"op": op.as_str(), "after": after})
+            after.row_data(op.as_str(), "after")
         }
     };
     Effect::Row(CloudEvent::row_change(
@@ -129,10 +130,10 @@ fn delete_effect(raw: &RawChange, source_id: &str, mode: PayloadMode) -> Effect 
     let data = match mode {
         PayloadMode::Signal => json!({"op": "delete", "signal": true}),
         PayloadMode::Full => {
-            let Some(key) = raw.document_key.clone() else {
+            let Some(key) = raw.document_key.as_ref() else {
                 return Effect::Filtered;
             };
-            json!({"op": "delete", "before": key})
+            key.row_data("delete", "before")
         }
     };
     Effect::Row(CloudEvent::row_change(
@@ -144,14 +145,14 @@ fn delete_effect(raw: &RawChange, source_id: &str, mode: PayloadMode) -> Effect 
     ))
 }
 
-fn control_effect(raw: &RawChange, kind: ControlKind, renamed_to: Option<TableRef>) -> Effect {
+fn control_effect(raw: &RawChange, kind: ControlKind) -> Effect {
     let Some(coll) = raw.coll.clone() else {
         return Effect::Filtered;
     };
     Effect::Control(ControlEvent {
         kind,
         subject: TableRef::new(&raw.db, coll),
-        renamed_to,
+        identity: None,
     })
 }
 
@@ -175,10 +176,14 @@ mod tests {
             coll: Some("orders".into()),
             to_db: None,
             to_coll: None,
-            document_key: Some(json!({"_id": {"$oid": "aabbccddeeff001122334455"}})),
-            full_document: Some(
-                json!({"_id": {"$oid": "aabbccddeeff001122334455"}, "n": {"$numberLong": "1"}}),
-            ),
+            document_key: Some(Image {
+                value: json!({"_id": "aabbccddeeff001122334455"}),
+                types: Some(json!({"_id": "objectId"})),
+            }),
+            full_document: Some(Image {
+                value: json!({"_id": "aabbccddeeff001122334455", "n": 1}),
+                types: Some(json!({"_id": "objectId"})),
+            }),
             txn_key: None,
             resume_token: json!({"_data": "t1"}),
             cluster_time: Some(ClusterTime { t: 9, i: 1 }),
@@ -193,7 +198,8 @@ mod tests {
         };
         assert_eq!(ev.ty, "io.ce-stream.row.inserted");
         assert_eq!(ev.subject, "app.orders");
-        assert_eq!(ev.data["after"]["n"]["$numberLong"], "1");
+        assert_eq!(ev.data["after"]["n"], 1);
+        assert_eq!(ev.data["types"]["_id"], "objectId");
 
         let replace = map_change(base(ChangeOpKind::Replace), "mongo://t", PayloadMode::Full);
         let Effect::Row(ev) = replace.effect else {
@@ -214,7 +220,8 @@ mod tests {
         };
         assert_eq!(ev.ty, "io.ce-stream.row.deleted");
         assert!(ev.data.get("after").is_none());
-        assert_eq!(ev.data["before"]["_id"]["$oid"], "aabbccddeeff001122334455");
+        assert_eq!(ev.data["before"]["_id"], "aabbccddeeff001122334455");
+        assert_eq!(ev.data["types"]["_id"], "objectId");
     }
 
     #[test]
@@ -226,8 +233,12 @@ mod tests {
         let Effect::Control(c) = mapped.effect else {
             panic!("control")
         };
-        assert_eq!(c.kind, ControlKind::Renamed);
-        assert_eq!(c.renamed_to.unwrap().table, "orders_old");
+        assert_eq!(
+            c.kind,
+            ControlKind::Renamed {
+                to: TableRef::new("app", "orders_old")
+            }
+        );
 
         let mut drop_db = base(ChangeOpKind::DropDatabase);
         drop_db.coll = None;

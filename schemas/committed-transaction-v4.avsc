@@ -1,0 +1,72 @@
+{
+  "type": "record",
+  "name": "CommittedTransaction",
+  "namespace": "io.ce_stream.v4",
+  "doc": "One committed source transaction, or one part of it, from any adapter (issue #19). The fields of committed-transaction-v3 without the GTID fields: MySQL has its position in position_at_json and position_after_json like every adapter. Schema id: ce-stream.committed-transaction.v4",
+  "fields": [
+    {
+      "name": "adapter",
+      "type": "string",
+      "doc": "Adapter id, e.g. mysql, mongo, postgres"
+    },
+    {
+      "name": "position_at_json",
+      "type": "string",
+      "doc": "JSON object: position of this commit"
+    },
+    {
+      "name": "position_after_json",
+      "type": "string",
+      "doc": "JSON object: resume payload after this commit; {} on a part that is not the last"
+    },
+    {
+      "name": "part_number",
+      "type": "int",
+      "doc": "1 for the first part; 0 for a transaction delivered whole"
+    },
+    {
+      "name": "part_last",
+      "type": "boolean",
+      "doc": "The last part: it ends the transaction. False for a transaction delivered whole"
+    },
+    {
+      "name": "ddl",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "DdlStatement",
+          "fields": [
+            { "name": "schema", "type": "string" },
+            { "name": "query", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "control_json",
+      "type": "string",
+      "doc": "JSON array of control events. [] when there are none."
+    },
+    {
+      "name": "events",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "CloudEvent",
+          "fields": [
+            { "name": "specversion", "type": "string" },
+            { "name": "id", "type": "string" },
+            { "name": "type", "type": "string" },
+            { "name": "source", "type": "string" },
+            { "name": "subject", "type": "string" },
+            { "name": "time", "type": "string" },
+            { "name": "extensions_json", "type": "string" },
+            { "name": "data_json", "type": "string" }
+          ]
+        }
+      }
+    }
+  ]
+}

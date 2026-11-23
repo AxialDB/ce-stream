@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use tracing::{debug, info};
 
-use crate::avro_encode::{self, CONTENT_TYPE_AVRO, CONTENT_TYPE_COMMITTED_TXN_AVRO, SCHEMA_ID};
+use crate::avro_encode::{self, CONTENT_TYPE_AVRO, SCHEMA_ID};
+use crate::delivery::Delivery;
 use crate::error::{Error, Result};
 use crate::event::{CloudEvent, SinkFormat};
-use crate::transaction::CommittedTransaction;
 use crate::Sink;
 
 pub struct StdoutSink {
@@ -82,7 +82,7 @@ impl HttpSink {
         self
     }
 
-    /// POST a JSON body (e.g. [`CommittedTransaction`] in transaction delivery mode).
+    /// POST a JSON body (e.g. a [`Delivery`] in transaction delivery mode).
     pub async fn post_json<T: serde::Serialize>(&self, body: &T) -> Result<()> {
         let mut req = self
             .client
@@ -106,17 +106,16 @@ impl HttpSink {
         Ok(())
     }
 
-    /// POST one committed transaction envelope (JSON or Avro depending on sink format).
-    pub async fn post_committed_transaction(&self, txn: &CommittedTransaction) -> Result<()> {
+    /// POST one delivery (JSON or Avro depending on sink format).
+    pub async fn post_delivery(&self, delivery: &Delivery) -> Result<()> {
         match self.format {
-            SinkFormat::Json => self.post_json(txn).await,
+            SinkFormat::Json => self.post_json(delivery).await,
             SinkFormat::Avro => {
-                let body = avro_encode::encode_committed_transaction(txn)?;
-                let schema_id = avro_encode::committed_transaction_schema_id(txn);
+                let (body, schema_id, content_type) = avro_encode::encode_delivery(delivery)?;
                 let mut req = self
                     .client
                     .post(&self.url)
-                    .header("content-type", CONTENT_TYPE_COMMITTED_TXN_AVRO)
+                    .header("content-type", content_type)
                     .header("x-ce-stream-avro-schema", schema_id)
                     .body(body);
                 for (k, v) in &self.headers {
@@ -132,7 +131,7 @@ impl HttpSink {
                         truncate(&text, 200)
                     )));
                 }
-                debug!(%status, url = %self.url, gtid = %txn.gtid, "http committed transaction avro post ok");
+                debug!(%status, url = %self.url, schema = schema_id, "http delivery avro post ok");
                 Ok(())
             }
         }

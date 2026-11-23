@@ -1,11 +1,12 @@
-//! Commit-boundary delivery and checkpoint (shared by `run` / `run_transactions`).
+//! Commit-boundary delivery and checkpoint (shared by `run` / `run_deliveries`).
 
+use ce_stream_core::delivery::Delivery;
 use ce_stream_core::error::Result;
-use ce_stream_core::transaction::CommittedTransaction;
+use ce_stream_core::transaction::{CommittedTransaction, SourcePosition};
 use ce_stream_core::{Checkpoint, CheckpointStore, CloudEvent, DeliveryUnit};
 
 use crate::ddl;
-use crate::gtid::ExecutedSet;
+use crate::gtid::{commit_gtid, commit_gtid_set_after, ExecutedSet};
 
 /// Mutable capture state used while delivering one committed transaction.
 pub struct DeliverCtx<'a> {
@@ -14,6 +15,16 @@ pub struct DeliverCtx<'a> {
     pub executed: &'a mut ExecutedSet,
     pub checkpoint_store: &'a mut Option<Box<dyn CheckpointStore>>,
     pub checkpoint: &'a mut Option<Checkpoint>,
+}
+
+/// The GTID of the `XA PREPARE` this position's `XA COMMIT` or `XA ROLLBACK`
+/// ends: it becomes executed with it.
+fn prepared_gtid(position: &SourcePosition) -> Option<String> {
+    position
+        .at
+        .get("prepared_gtid")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Deliver one committed transaction and persist checkpoint on full success.
@@ -27,8 +38,9 @@ where
     F: FnMut(CloudEvent) -> Result<()>,
     G: FnMut(CommittedTransaction) -> Result<()>,
 {
-    let gtid = txn.gtid.clone();
-    let gtid_set_after = txn.gtid_set_after.clone();
+    let gtid = commit_gtid(&txn).to_string();
+    let gtid_set_after = commit_gtid_set_after(&txn).to_string();
+    let prepared = txn.position.as_ref().and_then(prepared_gtid);
     // A part that is not the last is not a commit: the transaction is not
     // executed until its last part, and a restart before it reads the
     // transaction again from its start.
@@ -53,6 +65,9 @@ where
     if !ends {
         return Ok(());
     }
+    if let Some(prepared) = prepared {
+        ctx.executed.add_committed(&prepared)?;
+    }
     ctx.executed.add_committed(&gtid)?;
     persist_gtid_set(
         ctx.executed.to_set_string(),
@@ -62,7 +77,41 @@ where
     .await
 }
 
-async fn persist_gtid_set(
+/// Hand a position with nothing for the consumer over, in transaction mode,
+/// and persist it on success: the transaction it stands for is executed all
+/// the same. Row mode has no use for it, and a sink would get one call per
+/// unrelated transaction.
+pub async fn deliver_progress<G>(
+    position: SourcePosition,
+    ctx: &mut DeliverCtx<'_>,
+    on_delivery: &mut G,
+) -> Result<()>
+where
+    G: FnMut(Delivery) -> Result<()>,
+{
+    let gtid = position
+        .at
+        .get("gtid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prepared = prepared_gtid(&position);
+    if ctx.delivery_unit == DeliveryUnit::Transaction {
+        on_delivery(Delivery::Progress { position })?;
+    }
+    if let Some(prepared) = prepared {
+        ctx.executed.add_committed(&prepared)?;
+    }
+    ctx.executed.add_committed(&gtid)?;
+    persist_gtid_set(
+        ctx.executed.to_set_string(),
+        ctx.checkpoint_store,
+        ctx.checkpoint,
+    )
+    .await
+}
+
+pub(crate) async fn persist_gtid_set(
     gtid_set: String,
     checkpoint_store: &mut Option<Box<dyn CheckpointStore>>,
     checkpoint: &mut Option<Checkpoint>,
@@ -91,6 +140,7 @@ async fn persist_gtid_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtid::commit_position;
     use ce_stream_core::error::Error;
     use ce_stream_core::event::{ChangeOp, TableRef};
     use std::cell::Cell;
@@ -141,8 +191,7 @@ mod tests {
             .collect();
         CommittedTransaction {
             part: None,
-            gtid: gtid.into(),
-            gtid_set_after: format!("{gtid}"),
+            position: Some(commit_position(gtid, gtid)),
             ddl: vec![],
             events,
             ..Default::default()
@@ -162,7 +211,10 @@ mod tests {
         let mut checkpoint = None;
         let delivered = Cell::new(0u32);
         let mut first = sample_txn("3e11fa47-71ca-11e1-9e33-c080020c9a66:1", 2);
-        first.gtid_set_after = String::new();
+        first.position = Some(crate::gtid::commit_position(
+            "3e11fa47-71ca-11e1-9e33-c080020c9a66:1",
+            "",
+        ));
         first.part = Some(TransactionPart {
             number: 1,
             last: false,
@@ -300,8 +352,7 @@ mod tests {
 
         let txn = CommittedTransaction {
             part: None,
-            gtid: "abc:1".into(),
-            gtid_set_after: "abc:1-1".into(),
+            position: Some(commit_position("abc:1", "abc:1-1")),
             ddl: vec![DdlStatement {
                 schema: "app".into(),
                 query: "ALTER TABLE t ADD COLUMN x INT".into(),
@@ -346,8 +397,7 @@ mod tests {
         deliver_committed(
             CommittedTransaction {
                 part: None,
-                gtid: "abc:2".into(),
-                gtid_set_after: "abc:1-2".into(),
+                position: Some(commit_position("abc:2", "abc:1-2")),
                 ddl: vec![DdlStatement {
                     schema: "app".into(),
                     query: "CREATE TABLE t (id INT)".into(),
@@ -387,8 +437,7 @@ mod tests {
         deliver_committed(
             CommittedTransaction {
                 part: None,
-                gtid: "abc:1".into(),
-                gtid_set_after: "abc:1-1".into(),
+                position: Some(commit_position("abc:1", "abc:1-1")),
                 ddl: vec![DdlStatement {
                     schema: "app".into(),
                     query: "ALTER TABLE t ADD COLUMN x INT".into(),

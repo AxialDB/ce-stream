@@ -46,6 +46,11 @@ pub trait JsonFormatter {
 
     fn value_time(&mut self, hour: i32, min: i32, sec: i32, micro_seconds: i32);
 
+    /// A negative time; `hour` is its absolute value, which may be 0.
+    fn value_negative_time(&mut self, hour: i32, min: i32, sec: i32, micro_seconds: i32) {
+        self.value_time(-hour, min, sec, micro_seconds);
+    }
+
     fn value_timestamp(&mut self, seconds_past_epoch: i64, micro_seconds: i32);
 
     fn value_opaque(&mut self, column_type: &ColumnType, value: &[u8]);

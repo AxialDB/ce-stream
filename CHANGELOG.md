@@ -7,6 +7,82 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
+One contract for every source, and `ce-stream-postgres` ([issue #19](https://github.com/AxialDB/ce-stream/issues/19)).
+Release notes: [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md).
+
+### Fixed
+
+- MongoDB: `IncludeList::in_effect_allows` reported a collection as delivered once the open stream's server filter sent it, while the reader still judged the events of the read it was waiting on by the list it had taken before that read. A collection the server already sent (an earlier table had it) was then reported at once, and its next change could be dropped: an embedder that copies the collection once it is reported lost that change. The reader now reports what it delivers, the server's filter and the list it judges events by (and an open transaction's own list), at each read. `IncludeFilter::both` and `TxnGrouper::pinned` are new.
+- MySQL: a resume on a server that purged binary logs the checkpoint never received is `Error::HistoryLost`. The dump used to be sent the server's `gtid_purged` too, so the server never refused and the purged transactions were skipped with no error. The server's own refusal (error 1236) is `HistoryLost` as well, and a read error of the dump ends `run` with that error instead of `Ok`.
+- MySQL: the rows of an XA transaction were never delivered, and its prepared GTID never entered the executed set. The rows are kept in memory from `XA PREPARE`, delivered at `XA COMMIT` as one commit at that position, and dropped at `XA ROLLBACK`. The prepared GTID stays out of the executed set until its `XA COMMIT` is delivered, so a restart between the two makes the server send the prepared transaction again. `XA COMMIT ... ONE PHASE` is an ordinary commit. An `XA COMMIT` whose rows were never read (prepared before capture first started, or its prepare purged) stops the stream with an error.
+- `FileCheckpointStore` wrote in place, so a kill during the write left an empty file that every restart refused. A save writes a temporary file and renames it.
+- `ce-stream-mysql-binlog`: `XaPrepareEvent::one_phase` was inverted. It is true for `XA COMMIT ... ONE PHASE` and false for `XA PREPARE`.
+- `ce-stream-mysql-binlog`: a negative `TIME` inside a `JSON` value was read wrongly. The whole packed value is negated, not the hour alone.
+
+### Added
+
+- MySQL: `server_missing` and `purged_missing`, what a server can no longer send to a checkpoint.
+- MySQL: a seed cut's `after` carries `baseline_gtid`, the baseline a checkpoint made from it holds.
+- `ce-stream-core`: `Delivery`, what every source hands its consumer through `ChangeSource::run_deliveries`: `Commit(CommittedTransaction)`, `Progress { position }` (the stream passed a position with nothing in it for this consumer), and `Schema(TableSchema)`.
+- `ChangeSource::covers(at, target)`: an embedder compares two positions without knowing the host. MySQL compares GTID sets, MongoDB cluster times, PostgreSQL LSNs by the end of a commit. Each adapter crate has it as `covers_position` too.
+- `SourceConfig::checkpoint`: `CheckpointMode::OnOk` (default, the callback's `Ok` moves the checkpoint) or `OnConfirm` (the checkpoint moves when the consumer calls `Confirm::confirm(position)` on the handle from `ChangeSource::confirm()`). CLI: `checkpoint = "on_ok" | "on_confirm"` under `[source]`; `on_confirm` needs `delivery_unit = "transaction"`.
+- `SeedCut` (`mark`, `wait_settled`): the cut for a seed, on a connection of the consumer's. `MysqlSeedCut`, `MongoSeedCut`, `PgSeedCut`.
+- `TableSchema` and `ColumnSchema` (`name`, `host_type`, `nullable`, `key`). MySQL delivers a `Schema` on a table's first sight and when its columns change, PostgreSQL every time the server announces the table, MongoDB none. In row mode it is a CloudEvent of type `io.ce-stream.schema`.
+- `GateReport { failures, warnings }` of `GateItem { object, problem, fix }` in `ce-stream-core`, and `ChangeSource::gate()` on every source.
+- `ControlKind::Truncated`, `ControlKind::DefinitionChanged`, and `ControlKind::Message { prefix, content }`. `ControlEvent::identity`, the table's host identity where it has one that survives a rename.
+- `CheckpointStore::sync`: the last save survives the machine. The default does nothing. `FileCheckpointStore` is in `ce-stream-core`.
+- `ce_stream_core::queue` (`QueueBytes`, `ReaderTasks`, `delivery_bytes`): the bounded queue of #16, for every adapter with a reader task. The MongoDB reader now runs apart from the consumer and uses it, with `queue_capacity` and `queue_max_bytes`.
+- Avro `committed-transaction-v4`, `progress-v1`, and `table-schema-v1`. `avro_encode::encode_delivery`, `encode_progress`, `decode_progress`, `encode_table_schema`, `decode_table_schema`, `decode_committed_transaction_v4`. `HttpSink::post_delivery`.
+- `ce-stream-postgres`: PostgreSQL 17+ logical replication (`pgoutput`) over its own protocol layer, with SCRAM-SHA-256 and TLS through `rustls`, no libpq. `PostgresSource`, `PostgresOptions`, `PostgresStreamOptions`, `PgSeedCut`, `create_slot`, `drop_slot`, `slot_figures` (`SlotFigures`), `catalog_tables`, `validate_capture_gates`. CLI: `source.adapter = "postgres"` with `database`, `tls_ca`, `slot`, `create_slot`, `publication`, `message_prefixes`, `min_server_version`.
+- PostgreSQL failover slots: `create_slot(options, slot, failover)`, `alter_slot_failover`, `SlotFigures::failover` and `synced`, CLI `failover = true`. A checkpoint on an older timeline than the server's resumes when it is at or before the point where the server's timeline forked from it, and is `Error::Checkpoint` past it. `fork_point` gives that point, `server_identity` the server's system identifier and timeline.
+- MySQL: a row of a partitioned table carries the extension `partition_id`, and on an update `source_partition_id`, the partition the row left. A table that is not partitioned has neither.
+- MySQL: `DROP TABLE`, `RENAME TABLE`, `ALTER TABLE`, `TRUNCATE`, and `DROP DATABASE` give typed controls in `control`, beside the text in `ddl`. A statement the parser cannot read gives the text only.
+- MySQL: `ce_stream_mysql::charset` (`charset_of_collation`, `admitted`, `decode`).
+- MySQL: `commit_position`, `commit_gtid`, `commit_gtid_set_after`, `covers_position`, `seed_cut_position`, `subtract_gtid_sets`, `union_gtid_sets`, `is_purged_refusal`, `CaptureServer`, `deliver_progress`, `new_confirm`.
+- MongoDB: each row has `types` beside its image, for the values whose form does not show their type. `MongoSeedCut`, `covers_position`, `new_confirm`.
+- `ce-stream-mysql-binlog`: `RowsEventHeader`; `partition_id` on `WriteRowsEvent`, `UpdateRowsEvent`, and `DeleteRowsEvent`, and `source_partition_id` on `UpdateRowsEvent`; `JsonFormatter::value_negative_time`.
+- [`docs/values.md`](docs/values.md): what a value of each host type looks like, for every adapter.
+- The examples in [`docs/library.md`](docs/library.md) compile: `cargo test --doc -p ce-stream-cli`.
+- Crash harness for PostgreSQL: `scripts/crash-harness/postgres/`.
+
+### Changed
+
+- **Breaking (callback):** `ChangeSource::run_transactions` with a `FnMut(CommittedTransaction)` is `ChangeSource::run_deliveries` with a `FnMut(Delivery)`. A consumer matches `Delivery::Commit(txn)`, `Delivery::Progress { position }`, and `Delivery::Schema(schema)`.
+- **Breaking (implementors):** `ChangeSource` requires `gate`, `confirm`, and `covers`, and is `Send + Sync` (was `Send`).
+- **Breaking:** `CommittedTransaction::gtid` and `gtid_set_after` are gone. MySQL fills `position` like every adapter: read `position.at["gtid"]` and `position.after["gtid"]`, or call `ce_stream_mysql::commit_gtid(&txn)` and `commit_gtid_set_after(&txn)`. A literal sets `position: Some(ce_stream_mysql::commit_position(gtid, set_after))`.
+- **Breaking:** `CommittedTransaction::source_position()` is gone. Read `txn.position`; every adapter sets it.
+- **Breaking (MySQL):** a transaction with nothing for the consumer (filtered by the include list, or a statement such as `GRANT`) was a commit with no events. It is a `Delivery::Progress` with the executed set in `position.after["gtid"]`. Row mode delivers nothing for it; the checkpoint still moves.
+- **Breaking (MongoDB):** the idle resume token was a commit with no events. It is a `Delivery::Progress`.
+- **Breaking:** `ControlKind` is `#[non_exhaustive]` and no longer `Copy`: a match needs a wildcard arm. `ControlKind::Renamed` is `ControlKind::Renamed { to }`, and `ControlEvent::renamed_to` is gone. `ControlEvent` has `identity`; a literal adds `identity: None`. In JSON the new name is `to` beside `kind`, where v0.5 wrote `renamed_to`; a v0.5 control event still decodes.
+- **Breaking (struct literals):** `SourceConfig` has `checkpoint`. A literal without `..Default::default()` adds `checkpoint: CheckpointMode::OnOk`.
+- **Breaking (struct literals):** `MysqlBinlogSource` and `MongoChangeStreamSource` have `confirm: Confirm`. A literal adds `confirm: ce_stream_mysql::new_confirm()` or `confirm: ce_stream_mongo::new_confirm()`.
+- **Breaking:** `ce_stream_mysql::IncludeList` is gone. Import `ce_stream_core::IncludeList`.
+- **Breaking:** `ce_stream_mysql::FileCheckpointStore` is `ce_stream_core::FileCheckpointStore`.
+- **Breaking:** `ce_stream_mysql::GateReport { warnings: Vec<String> }` is gone. `ce_stream_mysql::validate_capture_gates` returns `ce_stream_core::GateReport`, with the failures in the report where it returned `Err` on the first one. Call `.into_result()?` on the report to refuse on failures as before.
+- **Breaking:** `HttpSink::post_committed_transaction(&txn)` is `HttpSink::post_delivery(&delivery)`.
+- **Breaking (wire, transaction mode, JSON):** the body is a `Delivery`, `{"commit": {...}}`, `{"progress": {"position": {...}}}`, or `{"schema": {...}}`, where it was a bare `CommittedTransaction`. A commit has no `gtid` and `gtid_set_after`; it has `position` on every adapter.
+- **Breaking (wire, transaction mode, Avro):** `encode_committed_transaction` writes `committed-transaction-v4` for every commit, where it wrote v1, v2, or v3. v4 is v3 without the `gtid` fields, with `position` for every adapter. `Progress` and `Schema` are records of their own, each with its own `Content-Type`. v1 to v3 are read, not written.
+- **Breaking (wire, row mode):** a table's definition arrives as a CloudEvent of type `io.ce-stream.schema` before the table's first rows on a session (MySQL and PostgreSQL). A sink that takes every event as a row has to skip it.
+- **Breaking (MySQL values):** text is decoded from the column's own charset, where the bytes were read as UTF-8 and anything else became a `hex:` string. Decoded: `utf8mb4`, `utf8mb3`, `ascii`, `latin1`, `latin2`, `latin7`, `cp1250`, `cp1251`, `cp1256`, `cp1257`, `koi8r`, `macroman`, `cp932`, `euckr`, `gbk`. A column in any other charset is left out of the row. A value that cannot be decoded is an error naming the column.
+- **Breaking (MySQL values):** `ENUM` and `SET` are delivered as their labels (a `SET` joined by commas) and `JSON` as text, where they were a position, a bit mask, and binary.
+- **Breaking (MySQL values):** `BINARY`, `VARBINARY`, and `BLOB` are always a `hex:` string, where bytes that happened to be valid UTF-8 arrived as text.
+- **Breaking (MongoDB values):** a row holds the contract's values where it held extended JSON tags: an instant as microseconds, Decimal128 as a string, ObjectId as 24 hex characters, Binary as a `hex:` string. The types are in `types` beside the image ([`docs/values.md`](docs/values.md#mongodb)).
+- **Breaking (`ce-stream-mysql-binlog` 0.2.0):** the vendored crate goes from 0.1.0 to 0.2.0. `WriteRowsEvent`, `UpdateRowsEvent`, and `DeleteRowsEvent` have the public field `partition_id`, and `UpdateRowsEvent` has `source_partition_id`; a literal adds them. `EventHeader::parse_rows_event_common_header` takes `is_update: bool` and returns `RowsEventHeader`, where it returned a tuple.
+- MySQL: the commit that delivers an XA transaction's rows carries `prepared_gtid` in its `position.at`, beside `gtid`.
+- MySQL and MongoDB: the gate reports every failure at once, each with its object and fix.
+- CLI: an unknown `source.adapter` names the adapters it has (`mysql`, `mongo`, `postgres`). The health log in transaction mode counts `deliveries_total`, where it counted `commits_total`.
+- The workspace `rust-version` stays 1.75, and `ce-stream-postgres` builds on it. The CLI and `ce-stream-mongo` stay on 1.88.
+
+### Notes
+
+- Sources: MySQL 9.x, MongoDB 8.0+ replica sets, PostgreSQL 17+.
+- PostgreSQL: the slot is the embedder's to make and drop. A missing or invalidated slot is `Error::HistoryLost`, never a quiet new slot, and so is a checkpoint behind its slot.
+- PostgreSQL: the gate requires `REPLICA IDENTITY FULL` and a primary key on every included table, and `publish_via_partition_root = false`. A drop or a rename sends nothing on the stream; `catalog_tables` shows them.
+- A `Progress` is not delivered in row mode. It still moves the checkpoint.
+- Live MySQL, MongoDB, and PostgreSQL tests stay out of CI.
+
 ## [0.5.0] - 2026-10-25
 
 Long transactions in parts ([issue #16](https://github.com/AxialDB/ce-stream/issues/16)).
@@ -187,7 +263,11 @@ Release notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md).
 - Other database engines (Phase 6 parked).
 - Schema Registry / typed per-table Avro.
 
-[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.6.0
+[0.5.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.5.0
+[0.4.3]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.3
+[0.4.2]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.2
 [0.4.1]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.1
 [0.4.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.0
 [0.3.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.3.0

@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ce_stream_core::event::{PayloadMode, TableRef};
-use ce_stream_mysql::test_support::{dispatch, BinlogDispatchCtx};
-use ce_stream_mysql::{ExecutedSet, IncludeList, TxnBuffer};
+use ce_stream_core::IncludeList;
+use ce_stream_mysql::commit_gtid;
+use ce_stream_mysql::test_support::{commit_of, dispatch, BinlogDispatchCtx};
+use ce_stream_mysql::{ExecutedSet, TxnBuffer};
 use mysql_binlog_connector_rust::column::column_value::ColumnValue;
 use mysql_binlog_connector_rust::event::event_data::EventData;
 use mysql_binlog_connector_rust::event::gtid_event::GtidEvent;
@@ -30,6 +32,7 @@ fn table_map(table_id: u64, table: &str) -> TableMapEvent {
 
 fn write_rows(table_id: u64, n: usize) -> WriteRowsEvent {
     WriteRowsEvent {
+        partition_id: None,
         table_id,
         included_columns: vec![true],
         rows: (0..n)
@@ -72,7 +75,7 @@ fn add_takes_effect_on_next_gtid() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::WriteRows(write_rows(2, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
-    let first = rx.try_recv().unwrap().unwrap();
+    let first = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(first.events.len(), 1);
     assert_eq!(first.events[0].subject, "demo.orders");
 
@@ -82,7 +85,7 @@ fn add_takes_effect_on_next_gtid() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::WriteRows(write_rows(2, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 2 })).unwrap();
-    let second = rx.try_recv().unwrap().unwrap();
+    let second = commit_of(rx.try_recv().unwrap().unwrap());
     let mut subjects: Vec<_> = second.events.iter().map(|e| e.subject.as_str()).collect();
     subjects.sort();
     assert_eq!(subjects, vec!["demo.noise", "demo.orders"]);
@@ -113,7 +116,7 @@ fn remove_takes_effect_on_next_gtid() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::WriteRows(write_rows(2, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
-    assert_eq!(rx.try_recv().unwrap().unwrap().events.len(), 2);
+    assert_eq!(commit_of(rx.try_recv().unwrap().unwrap()).events.len(), 2);
 
     include.remove(&TableRef::new("demo", "orders"));
 
@@ -121,7 +124,7 @@ fn remove_takes_effect_on_next_gtid() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::WriteRows(write_rows(2, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 2 })).unwrap();
-    let second = rx.try_recv().unwrap().unwrap();
+    let second = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(second.events.len(), 1);
     assert_eq!(second.events[0].subject, "demo.noise");
 }
@@ -153,7 +156,7 @@ fn mid_transaction_update_does_not_split_envelope() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(2, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(commit.events.len(), 1);
     assert_eq!(commit.events[0].subject, "demo.orders");
 }
@@ -183,10 +186,10 @@ fn remove_all_still_delivers_empty_commit() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 2))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert!(commit.events.is_empty());
     assert!(commit.ddl.is_empty());
-    assert_eq!(commit.gtid, "uuid:1");
+    assert_eq!(commit_gtid(&commit), "uuid:1");
 }
 
 #[test]
@@ -214,7 +217,7 @@ fn replace_takes_effect_on_next_gtid() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
     assert_eq!(
-        rx.try_recv().unwrap().unwrap().events[0].subject,
+        commit_of(rx.try_recv().unwrap().unwrap()).events[0].subject,
         "demo.orders"
     );
 
@@ -224,7 +227,7 @@ fn replace_takes_effect_on_next_gtid() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::WriteRows(write_rows(2, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 2 })).unwrap();
-    let second = rx.try_recv().unwrap().unwrap();
+    let second = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(second.events.len(), 1);
     assert_eq!(second.events[0].subject, "demo.noise");
 }
@@ -265,7 +268,7 @@ fn ddl_is_not_gated_by_include_list() {
     dispatch(&mut ctx, EventData::WriteRows(write_rows(1, 1))).unwrap();
     dispatch(&mut ctx, EventData::Xid(XidEvent { xid: 1 })).unwrap();
 
-    let commit = rx.try_recv().unwrap().unwrap();
+    let commit = commit_of(rx.try_recv().unwrap().unwrap());
     assert_eq!(commit.ddl.len(), 1);
     assert!(commit.events.is_empty());
 }

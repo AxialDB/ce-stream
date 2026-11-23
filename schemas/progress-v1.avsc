@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "Progress",
+  "namespace": "io.ce_stream.v1",
+  "doc": "The stream moved to a position and nothing in it was for this consumer (issue #19). Schema id: ce-stream.progress.v1",
+  "fields": [
+    { "name": "adapter", "type": "string" },
+    {
+      "name": "position_at_json",
+      "type": "string",
+      "doc": "JSON object: the position; a consumer's own mark also has its lsn, prefix, and content here"
+    },
+    {
+      "name": "position_after_json",
+      "type": "string",
+      "doc": "JSON object: resume payload, the same shape as a commit's"
+    }
+  ]
+}

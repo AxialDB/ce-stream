@@ -31,7 +31,7 @@ One issue, one branch, one PR, one release (#1 shipped as v0.2.0, #3 as v0.3.0).
 8. The maintainer merges to `main` by hand.
 9. Annotated tag on `main`: `git tag -a v0.3.0 -m "v0.3.0: live include-list updates"`
 10. Push the tag: `git push origin v0.3.0`
-7. The **Release** workflow publishes the GitHub Release from `docs/releases/v0.3.0.md` and attaches:
+11. The **Release** workflow publishes the GitHub Release from `docs/releases/v0.3.0.md` and attaches:
    - `ce-stream-v0.3.0-x86_64-unknown-linux-gnu.tar.gz`
    - `ce-stream-v0.3.0-x86_64-pc-windows-msvc.zip`
    - `SHA256SUMS`
@@ -64,6 +64,7 @@ cargo publish -p ce-stream-mysql-binlog
 cargo publish -p ce-stream-core
 cargo publish -p ce-stream-mysql
 cargo publish -p ce-stream-mongo
+cargo publish -p ce-stream-postgres
 cargo publish -p ce-stream-cli
 ```
 

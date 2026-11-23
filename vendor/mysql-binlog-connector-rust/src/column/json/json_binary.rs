@@ -273,15 +273,25 @@ impl JsonBinary<'_> {
     }
 
     pub fn parse_time<F: JsonFormatter>(&mut self, formatter: &mut F) -> Result<(), BinlogError> {
+        // A negative time is the negative of the whole packed value.
         let raw = self.read_int64()?;
+        let negative = raw < 0;
+        let raw = raw.wrapping_abs();
         let value = raw >> 24;
-        let negative = value < 0;
         let hour = (value >> 12) % (1 << 10); // 10 bits starting at 12th
         let min = (value >> 6) % (1 << 6); // 6 bits starting at 6th
         let sec = value % (1 << 6); // 6 bits starting at 0th
-        let hour = if negative { -hour } else { hour };
         let micro_seconds = (raw % (1 << 24)) as u32;
-        formatter.value_time(hour as i32, min as i32, sec as i32, micro_seconds as i32);
+        if negative {
+            formatter.value_negative_time(
+                hour as i32,
+                min as i32,
+                sec as i32,
+                micro_seconds as i32,
+            );
+        } else {
+            formatter.value_time(hour as i32, min as i32, sec as i32, micro_seconds as i32);
+        }
         Ok(())
     }
 

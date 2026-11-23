@@ -77,6 +77,12 @@ impl TxnGrouper {
         self
     }
 
+    /// The list the open transaction was started with: its later events are
+    /// judged by it, not by a newer one.
+    pub fn pinned(&self) -> Option<&IncludeFilter> {
+        self.open.as_ref().map(|group| &group.filter)
+    }
+
     pub fn push(&mut self, incoming: Incoming, filter: &IncludeFilter) -> Vec<Emit> {
         let Some(key) = incoming.txn_key.clone() else {
             let mut out = self.flush(None);
@@ -277,14 +283,14 @@ fn filter_effect(effect: Effect, filter: &IncludeFilter) -> Effect {
             }
         }
         Effect::Control(ev) => match ev.kind {
-            ControlKind::Dropped | ControlKind::Renamed => {
+            ControlKind::Dropped | ControlKind::Renamed { .. } => {
                 if ev.subject.table.is_empty() || filter.row_allowed(&ev.subject.as_subject()) {
                     Effect::Control(ev)
                 } else {
                     Effect::Filtered
                 }
             }
-            ControlKind::DatabaseDropped | ControlKind::Invalidated => Effect::Control(ev),
+            _ => Effect::Control(ev),
         },
         Effect::Filtered => Effect::Filtered,
     }
@@ -306,8 +312,14 @@ mod tests {
                 coll: Some(coll.into()),
                 to_db: None,
                 to_coll: None,
-                document_key: Some(json!({"_id": {"$oid": "aabbccddeeff001122334455"}})),
-                full_document: Some(json!({"_id": 1})),
+                document_key: Some(crate::bson_json::Image {
+                    value: json!({"_id": "aabbccddeeff001122334455"}),
+                    types: Some(json!({"_id": "objectId"})),
+                }),
+                full_document: Some(crate::bson_json::Image {
+                    value: json!({"_id": 1}),
+                    types: None,
+                }),
                 txn_key: txn.map(str::to_string),
                 resume_token: json!({"_data": token}),
                 cluster_time: Some(ClusterTime { t: 1, i: 1 }),
@@ -405,7 +417,6 @@ mod tests {
         let out = g.push(raw(ChangeOpKind::Insert, "a", None, "orders"), &orders());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].txn.events.len(), 1);
-        assert!(out[0].txn.gtid.is_empty());
     }
 
     #[test]

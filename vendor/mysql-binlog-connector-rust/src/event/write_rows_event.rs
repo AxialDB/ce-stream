@@ -11,6 +11,10 @@ pub struct WriteRowsEvent {
     pub table_id: u64,
     pub included_columns: Vec<bool>,
     pub rows: Vec<RowEvent>,
+    /// The partition the rows are in, for a partitioned table on MySQL 8.0 and
+    /// later; see `RowsEventHeader::partition_id`.
+    #[serde(default)]
+    pub partition_id: Option<u16>,
 }
 
 impl WriteRowsEvent {
@@ -20,20 +24,20 @@ impl WriteRowsEvent {
         row_event_version: u8,
     ) -> Result<Self, BinlogError> {
         // refer: https://mariadb.com/kb/en/rows_event_v1v2-rows_compressed_event_v1/
-        let (table_id, _column_count, included_columns) =
-            EventHeader::parse_rows_event_common_header(cursor, row_event_version)?;
-        let table_map_event = table_map_event_by_table_id.get(&table_id).unwrap();
+        let header = EventHeader::parse_rows_event_common_header(cursor, row_event_version, false)?;
+        let table_map_event = table_map_event_by_table_id.get(&header.table_id).unwrap();
 
         let mut rows: Vec<RowEvent> = Vec::new();
         while cursor.available() > 0 {
-            let row = RowEvent::parse(cursor, table_map_event, &included_columns)?;
+            let row = RowEvent::parse(cursor, table_map_event, &header.included_columns)?;
             rows.push(row);
         }
 
         Ok(Self {
-            table_id,
-            included_columns,
+            table_id: header.table_id,
+            included_columns: header.included_columns,
             rows,
+            partition_id: header.partition_id,
         })
     }
 }

@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use ce_stream_core::delivery::Delivery;
 use ce_stream_core::event::TableRef;
 use ce_stream_core::include::IncludeList;
 use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
@@ -52,10 +53,20 @@ fn start(uri: &str, tables: &[&str], checkpoint: Option<Checkpoint>) -> Capture 
         checkpoint_store: None,
         skip_gate_check: false,
         include: include.clone(),
+        confirm: ce_stream_mongo::new_confirm(),
     };
     let task = tokio::spawn(async move {
         source
-            .run_transactions(move |txn| {
+            .run_deliveries(move |delivery| {
+                // A position passed counts as a commit with no events here.
+                let txn = match delivery {
+                    Delivery::Commit(txn) => txn,
+                    Delivery::Progress { position } => CommittedTransaction {
+                        position: Some(position),
+                        ..Default::default()
+                    },
+                    Delivery::Schema(_) => return Ok(()),
+                };
                 let _ = tx.send(txn);
                 Ok(())
             })
@@ -117,12 +128,7 @@ impl Capture {
                         .or_else(|| data.get("before"))
                         .cloned()
                         .unwrap_or_default();
-                    let id = &doc["_id"];
-                    let id = id
-                        .as_i64()
-                        .or_else(|| id["$numberInt"].as_str().and_then(|n| n.parse().ok()))
-                        .or_else(|| id["$numberLong"].as_str().and_then(|n| n.parse().ok()))
-                        .unwrap_or(-1);
+                    let id = doc["_id"].as_i64().unwrap_or(-1);
                     (collection, id)
                 })
                 .collect();

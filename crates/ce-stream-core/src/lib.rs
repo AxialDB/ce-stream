@@ -7,18 +7,24 @@
 
 pub mod avro_encode;
 pub mod checkpoint;
+pub mod delivery;
 pub mod error;
 pub mod event;
+pub mod gate;
 pub mod include;
+pub mod queue;
 pub mod sink;
 pub mod sinks;
 pub mod source;
 pub mod transaction;
 
-pub use checkpoint::{Checkpoint, CheckpointStore};
+pub use checkpoint::{Checkpoint, CheckpointStore, FileCheckpointStore};
+pub use delivery::{CheckpointMode, ColumnSchema, Confirm, Delivery, SeedCut, TableSchema};
 pub use error::Error;
 pub use event::{ChangeOp, CloudEvent, PayloadMode, SinkFormat, TableRef};
+pub use gate::{GateItem, GateReport};
 pub use include::{IncludeFilter, IncludeList};
+pub use queue::QueueBytes;
 pub use sink::Sink;
 pub use sinks::{HttpSink, StdoutSink};
 pub use source::{ChangeSource, DeliveryUnit, SourceConfig};

@@ -14,7 +14,7 @@ fn add_committed_fills_hole() {
 }
 
 #[test]
-fn handshake_unions_purged_baseline_and_checkpoint() {
+fn handshake_is_baseline_and_checkpoint_when_the_purge_is_inside() {
     let uuid = "49b103aa-6814-11f1-aab9-144fd7d9c421";
     let out = ExecutedSet::binlog_handshake_gtid_set(
         &format!("{uuid}:4105-4105"),
@@ -23,6 +23,30 @@ fn handshake_unions_purged_baseline_and_checkpoint() {
     )
     .unwrap();
     assert_eq!(out, format!("{uuid}:1-4105"));
+}
+
+#[test]
+fn handshake_is_history_lost_when_the_server_purged_past_the_checkpoint() {
+    let uuid = "49b103aa-6814-11f1-aab9-144fd7d9c421";
+    let err = ExecutedSet::binlog_handshake_gtid_set(
+        &format!("{uuid}:1-123"),
+        Some(&format!("{uuid}:1-100")),
+        &format!("{uuid}:1-183"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ce_stream_core::Error::HistoryLost(_)),
+        "{err}"
+    );
+    assert_eq!(
+        ce_stream_mysql::purged_missing(
+            &format!("{uuid}:1-123"),
+            Some(&format!("{uuid}:1-100")),
+            &format!("{uuid}:1-183")
+        )
+        .unwrap(),
+        format!("{uuid}:124-183")
+    );
 }
 
 #[test]

@@ -3,14 +3,9 @@
 use std::collections::HashMap;
 
 use ce_stream_core::error::{Error, Result};
+use ce_stream_core::gate::GateReport;
 use mysql_binlog_connector_rust::command::authenticator::Authenticator;
 use mysql_binlog_connector_rust::command::command_util::CommandUtil;
-
-/// Outcome of capture gate validation (warnings are non-fatal).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct GateReport {
-    pub warnings: Vec<String>,
-}
 
 const GATE_VARIABLES: &[&str] = &[
     "binlog_format",
@@ -21,62 +16,71 @@ const GATE_VARIABLES: &[&str] = &[
 ];
 
 /// Evaluate gate variables already fetched from the server.
-pub fn evaluate_gate_variables(vars: &HashMap<String, String>) -> Result<GateReport> {
+pub fn evaluate_gate_variables(vars: &HashMap<String, String>) -> GateReport {
     let mut report = GateReport::default();
 
     require_value(
+        &mut report,
         vars,
         "binlog_format",
         &["ROW"],
         "SET GLOBAL binlog_format = 'ROW';",
-    )?;
+    );
     require_value(
+        &mut report,
         vars,
         "binlog_row_image",
         &["FULL"],
         "SET GLOBAL binlog_row_image = 'FULL';",
-    )?;
+    );
     require_value(
+        &mut report,
         vars,
         "binlog_row_metadata",
         &["FULL"],
         "SET PERSIST binlog_row_metadata = 'FULL';",
-    )?;
-    require_value(vars, "gtid_mode", &["ON"], "SET GLOBAL gtid_mode = ON;")?;
+    );
+    require_value(
+        &mut report,
+        vars,
+        "gtid_mode",
+        &["ON"],
+        "SET GLOBAL gtid_mode = ON;",
+    );
 
     match vars.get("enforce_gtid_consistency").map(|s| s.as_str()) {
         Some("ON") => {}
-        Some(value) => report.warnings.push(format!(
-            "enforce_gtid_consistency={value} (recommended ON for safe GTID capture)"
-        )),
-        None => report
-            .warnings
-            .push("enforce_gtid_consistency not reported (recommended ON)".into()),
+        Some(value) => report.warn(
+            "enforce_gtid_consistency",
+            format!("{value} (recommended ON for safe GTID capture)"),
+            None,
+        ),
+        None => report.warn(
+            "enforce_gtid_consistency",
+            "not reported (recommended ON)",
+            None,
+        ),
     }
 
-    Ok(report)
+    report
 }
 
 fn require_value(
+    report: &mut GateReport,
     vars: &HashMap<String, String>,
     name: &str,
     allowed: &[&str],
     remediation: &str,
-) -> Result<()> {
-    let value = vars.get(name).map(|s| s.as_str()).ok_or_else(|| {
-        Error::Source(format!(
-            "capture gate failed: missing server variable {name}. Remediation: {remediation}"
-        ))
-    })?;
-
-    if allowed.iter().any(|a| value.eq_ignore_ascii_case(a)) {
-        return Ok(());
+) {
+    match vars.get(name) {
+        None => report.fail(name, "missing server variable", Some(remediation)),
+        Some(value) if allowed.iter().any(|a| value.eq_ignore_ascii_case(a)) => {}
+        Some(value) => report.fail(
+            name,
+            format!("{value} (required {})", allowed.join("|")),
+            Some(remediation),
+        ),
     }
-
-    Err(Error::Source(format!(
-        "capture gate failed: {name}={value} (required {}). Remediation: {remediation}",
-        allowed.join("|")
-    )))
 }
 
 /// Read a global GTID-related server variable (`gtid_purged`, `gtid_executed`, ...).
@@ -100,10 +104,54 @@ pub async fn fetch_global_gtid(url: &str, variable: &str) -> Result<String> {
         .await
         .map_err(|e| Error::Source(format!("gtid variable query: {e}")))?;
 
-    rows.into_iter()
+    let set = rows
+        .into_iter()
         .next()
         .and_then(|row| row.values.into_iter().next())
-        .ok_or_else(|| Error::Source(format!("gtid variable {variable}: empty result")))
+        .ok_or_else(|| Error::Source(format!("gtid variable {variable}: empty result")))?;
+    // MySQL breaks a long set into lines.
+    Ok(set.split_whitespace().collect())
+}
+
+/// What a seed cut has to know of the server the stream reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureServer {
+    pub server_uuid: String,
+    /// Are replicated transactions written to this server's binlog?
+    pub log_replica_updates: bool,
+    pub gtid_purged: String,
+}
+
+/// Read [`CaptureServer`] in one statement.
+pub async fn fetch_capture_server(url: &str) -> Result<CaptureServer> {
+    let mut authenticator = Authenticator::new(url, 30, None)
+        .map_err(|e| Error::Source(format!("capture server connect: {e}")))?;
+    let mut channel = authenticator
+        .connect()
+        .await
+        .map_err(|e| Error::Source(format!("capture server connect: {e}")))?;
+    let rows = CommandUtil::execute_query(
+        &mut channel,
+        "SELECT @@GLOBAL.server_uuid, @@GLOBAL.log_replica_updates, @@GLOBAL.gtid_purged",
+    )
+    .await
+    .map_err(|e| Error::Source(format!("capture server query: {e}")))?;
+    let mut values = rows
+        .into_iter()
+        .next()
+        .map(|row| row.values)
+        .unwrap_or_default()
+        .into_iter();
+    let mut next = || {
+        values
+            .next()
+            .ok_or_else(|| Error::Source("capture server query: a short result".into()))
+    };
+    Ok(CaptureServer {
+        server_uuid: next()?,
+        log_replica_updates: next()? == "1",
+        gtid_purged: next()?.split_whitespace().collect(),
+    })
 }
 
 /// Connect and validate MySQL server settings for ROW binlog capture.
@@ -133,7 +181,7 @@ pub async fn validate_capture_gates(url: &str) -> Result<GateReport> {
         }
     }
 
-    evaluate_gate_variables(&vars)
+    Ok(evaluate_gate_variables(&vars))
 }
 
 #[cfg(test)]
@@ -155,8 +203,8 @@ mod tests {
             ("binlog_row_metadata", "FULL"),
             ("gtid_mode", "ON"),
             ("enforce_gtid_consistency", "ON"),
-        ]))
-        .expect("gates ok");
+        ]));
+        assert!(report.passed());
         assert!(report.warnings.is_empty());
     }
 
@@ -168,21 +216,29 @@ mod tests {
             ("binlog_row_metadata", "FULL"),
             ("gtid_mode", "ON"),
             ("enforce_gtid_consistency", "OFF"),
-        ]))
-        .expect("gates ok with warning");
+        ]));
+        assert!(report.passed());
         assert_eq!(report.warnings.len(), 1);
     }
 
     #[test]
     fn fails_when_binlog_row_metadata_not_full() {
-        let err = evaluate_gate_variables(&vars(&[
+        let report = evaluate_gate_variables(&vars(&[
             ("binlog_format", "ROW"),
             ("binlog_row_image", "FULL"),
             ("binlog_row_metadata", "MINIMAL"),
             ("gtid_mode", "ON"),
             ("enforce_gtid_consistency", "ON"),
-        ]))
-        .unwrap_err();
+        ]));
+        assert_eq!(report.failures.len(), 1);
+        let err = report.into_result().unwrap_err();
         assert!(err.to_string().contains("binlog_row_metadata"));
+    }
+
+    #[test]
+    fn reports_every_failure_at_once() {
+        let report = evaluate_gate_variables(&vars(&[("binlog_format", "MIXED")]));
+        // MIXED, and the three variables the server did not report.
+        assert_eq!(report.failures.len(), 4);
     }
 }

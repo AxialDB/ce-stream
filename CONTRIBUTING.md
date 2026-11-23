@@ -16,12 +16,12 @@ There is no public Jira. GitHub is the tracker.
 
 ## Development
 
-Requirements: Rust stable (see `rust-version` in workspace `Cargo.toml`), MySQL **9.x** (or a MongoDB **8.0+** replica set for the Mongo source) only if you run live capture / E2E.
+Requirements: Rust stable (see `rust-version` in workspace `Cargo.toml`), MySQL **9.x** (or a MongoDB **8.0+** replica set, or PostgreSQL **17+**, for those sources) only if you run live capture / E2E.
 
 ```powershell
 cargo fmt --all
-cargo clippy -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo -p ce-stream-cli -p ce-stream-perf-sink --no-deps -- -D warnings
-cargo test -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo
+cargo clippy -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo -p ce-stream-postgres -p ce-stream-cli -p ce-stream-perf-sink --no-deps -- -D warnings
+cargo test -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo -p ce-stream-postgres
 ```
 
 Copy `ce-stream.toml.example` → `ce-stream.toml` for local runs (gitignored). Do not commit secrets.
@@ -41,5 +41,5 @@ Maintainers: issue, branch, PR, and release steps are in [`docs/releasing.md`](d
 
 ## Scope reminders
 
-- MySQL **9.x**. MongoDB **8.0+** replica sets are in progress ([#5](https://github.com/AxialDB/ce-stream/issues/5)). Other DB engines are deferred.
+- MySQL **9.x**, MongoDB **8.0+** replica sets, and PostgreSQL **17+** ([#19](https://github.com/AxialDB/ce-stream/issues/19)). Other DB engines are deferred.
 - JSON CloudEvents are the default interchange; Avro is optional.

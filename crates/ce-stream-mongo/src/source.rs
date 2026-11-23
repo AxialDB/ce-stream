@@ -1,12 +1,16 @@
 //! Change stream loop. Grouping and mapping are tested without a server.
 
 use async_trait::async_trait;
+use ce_stream_core::delivery::{CheckpointMode, Confirm, Delivery};
 use ce_stream_core::error::{Error, Result};
-use ce_stream_core::event::CloudEvent;
+use ce_stream_core::event::{CloudEvent, PayloadMode};
+use ce_stream_core::gate::GateReport;
 use ce_stream_core::include::{IncludeFilter, IncludeList};
-use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig};
-use ce_stream_core::transaction::{CommittedTransaction, ControlEvent};
+use ce_stream_core::queue::{delivery_bytes, QueueBytes, ReaderTasks};
+use ce_stream_core::source::{ChangeSource, DeliveryUnit, SourceConfig, DEFAULT_QUEUE_MAX_BYTES};
+use ce_stream_core::transaction::{ControlEvent, SourcePosition};
 use ce_stream_core::{Checkpoint, CheckpointStore};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mongodb::bson::{doc, Document, Timestamp};
@@ -16,7 +20,7 @@ use mongodb::options::FullDocumentType;
 use mongodb::{Client, Database};
 use serde_json::Value;
 
-use crate::bson_json::{document_to_json, document_to_json_owned};
+use crate::bson_json::{document_image, identity_text};
 use crate::checkpoint::{ClusterTime, MongoCheckpoint};
 use crate::gate::validate_capture_gates;
 use crate::group::{Emit, TxnGrouper};
@@ -121,6 +125,13 @@ pub struct MongoChangeStreamSource {
     pub checkpoint_store: Option<Box<dyn CheckpointStore>>,
     pub skip_gate_check: bool,
     pub include: IncludeList,
+    /// The handle for [`CheckpointMode::OnConfirm`]; from [`new_confirm`].
+    pub confirm: Confirm,
+}
+
+/// A [`Confirm`] that orders positions as this adapter does.
+pub fn new_confirm() -> Confirm {
+    Confirm::new(crate::checkpoint::ADAPTER, crate::covers_position)
 }
 
 impl MongoChangeStreamSource {
@@ -128,14 +139,27 @@ impl MongoChangeStreamSource {
         self.include.clone()
     }
 
-    async fn run_capture<RowFn, TxnFn>(
+    /// The checkpoint moves to a position.
+    async fn save_position(&mut self, position: &SourcePosition) -> Result<()> {
+        let cp = Checkpoint {
+            adapter: crate::checkpoint::ADAPTER.into(),
+            payload: position.after.clone(),
+        };
+        if let Some(store) = self.checkpoint_store.as_mut() {
+            store.save(&cp).await?;
+        }
+        self.checkpoint = Some(cp);
+        Ok(())
+    }
+
+    async fn run_capture<RowFn, DeliveryFn>(
         &mut self,
         mut on_row: RowFn,
-        mut on_txn: TxnFn,
+        mut on_delivery: DeliveryFn,
     ) -> Result<()>
     where
         RowFn: FnMut(CloudEvent) -> Result<()> + Send,
-        TxnFn: FnMut(CommittedTransaction) -> Result<()> + Send,
+        DeliveryFn: FnMut(Delivery) -> Result<()> + Send,
     {
         let client = Client::with_uri_str(&self.options.uri)
             .await
@@ -150,7 +174,8 @@ impl MongoChangeStreamSource {
                 &watched,
                 self.options.full_document,
             )
-            .await?;
+            .await?
+            .into_result()?;
             for warning in &report.warnings {
                 tracing::warn!(gate_warning = %warning, "capture gate warning");
             }
@@ -161,7 +186,7 @@ impl MongoChangeStreamSource {
             .as_ref()
             .and_then(MongoCheckpoint::from_checkpoint);
         let seed = stored.as_ref().and_then(|s| s.seed_cluster_time);
-        let mut start = match (stored.as_ref().and_then(resume_token), seed) {
+        let start = match (stored.as_ref().and_then(resume_token), seed) {
             (Some(token), _) => Start::After(token),
             (None, Some(seed_time)) => Start::At(Timestamp {
                 time: seed_time.t,
@@ -169,16 +194,6 @@ impl MongoChangeStreamSource {
             }),
             (None, None) => Start::Now,
         };
-
-        let database = client.database(&self.options.database);
-        let mut open = in_this_database(&self.options.database, &self.include.snapshot_filter());
-        let mut stream = self.open_stream(&database, &open, &start).await?;
-        self.include.set_in_effect(Some(open.clone()));
-        let _in_effect = InEffect(self.include.clone());
-        // The last place read from the server: an event, or the end of an empty batch.
-        let mut last_read: Option<ResumeToken> = None;
-        let mut grouper = TxnGrouper::new(seed)
-            .with_part_limits(self.config.part_max_rows, self.config.part_max_bytes);
         tracing::info!(
             database = %self.options.database,
             part_max_rows = self.config.part_max_rows,
@@ -186,102 +201,82 @@ impl MongoChangeStreamSource {
             "starting MongoDB change stream source"
         );
 
-        loop {
-            // TxnGrouper pins this filter when the group starts. Later events in the group ignore a newer list.
-            let filter = self.include.snapshot_filter();
-            let wanted = in_this_database(&self.options.database, &filter);
-            if !covers(&open, &wanted) {
-                // The list gained a collection the server leaves out. Open the stream again
-                // where this one stopped reading, with the wider filter: what follows that
-                // place is sent once, and nothing of it is skipped.
-                if let Some(token) = last_read.clone().or_else(|| stream.resume_token()) {
-                    start = Start::After(token);
-                }
-                stream = self.open_stream(&database, &wanted, &start).await?;
-                open = wanted;
-                self.include.set_in_effect(Some(open.clone()));
-                tracing::info!(
-                    database = %self.options.database,
-                    "change stream opened again with a wider include list"
-                );
-            }
-            match stream.next_if_any().await.map_err(map_mongo)? {
-                Some(event) => {
-                    last_read = Some(event.id.clone());
-                    let incoming = map_change(
-                        raw_change(event)?,
-                        &self.config.source_id,
-                        self.config.payload_mode,
-                    );
-                    for emit in grouper.push(incoming, &filter) {
-                        let stop = self.deliver(emit, &mut on_row, &mut on_txn).await?;
-                        if stop {
-                            return Ok(());
+        // The reader and the consumer are apart, as on every adapter with a
+        // reader task: a slow consumer holds the reader at the queue's limits.
+        let queue_max_bytes = match self.config.queue_max_bytes {
+            0 => DEFAULT_QUEUE_MAX_BYTES,
+            bytes => bytes,
+        };
+        let queue = Arc::new(QueueBytes::new(queue_max_bytes as u64));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.queue_capacity.max(1));
+        let reader = Reader {
+            database: client.database(&self.options.database),
+            options: self.options.clone(),
+            source_id: self.config.source_id.clone(),
+            payload_mode: self.config.payload_mode,
+            include: self.include.clone(),
+            grouper: TxnGrouper::new(seed)
+                .with_part_limits(self.config.part_max_rows, self.config.part_max_bytes),
+            start,
+            queue: Arc::clone(&queue),
+            tx,
+        };
+        let task = tokio::spawn(reader.run());
+        let _tasks = ReaderTasks::new(Arc::clone(&queue), vec![task.abort_handle()]);
+
+        let on_confirm = self.config.checkpoint == CheckpointMode::OnConfirm;
+        let mut confirmed = self.confirm.subscribe();
+        let result = loop {
+            let emit = tokio::select! {
+                emit = rx.recv() => emit,
+                changed = confirmed.changed(), if on_confirm => {
+                    if changed.is_ok() {
+                        let position = confirmed.borrow_and_update().clone();
+                        if let Some(position) = position {
+                            if let Err(err) = self.save_position(&position).await {
+                                break Err(err);
+                            }
                         }
                     }
+                    continue;
                 }
-                None => {
-                    if !stream.is_alive() {
-                        return Ok(());
-                    }
-                    let token = stream.resume_token();
-                    if token.is_some() {
-                        last_read = token.clone();
-                    }
-                    let token = token.and_then(|t| token_json(&t).ok());
-                    for emit in grouper.on_batch_boundary(token) {
-                        let stop = self.deliver(emit, &mut on_row, &mut on_txn).await?;
-                        if stop {
-                            return Ok(());
-                        }
-                    }
-                }
+            };
+            let emit = match emit {
+                None => break Ok(()),
+                Some(Err(err)) => break Err(err),
+                Some(Ok(emit)) => emit,
+            };
+            let bytes = delivery_bytes(&emit.txn);
+            match self.deliver(emit, &mut on_row, &mut on_delivery).await {
+                Ok(true) => break Ok(()),
+                Ok(false) => queue.release(bytes),
+                Err(err) => break Err(err),
             }
-        }
+        };
+        // A reader blocked on a full queue, or waiting for the server, ends with
+        // `_tasks`.
+        result
     }
 
-    async fn open_stream(
-        &self,
-        database: &Database,
-        filter: &IncludeFilter,
-        start: &Start,
-    ) -> Result<ChangeStream<ChangeStreamEvent<Document>>> {
-        let mut watch = database.watch().max_await_time(AWAIT).full_document(
-            match self.options.full_document {
-                FullDocumentMode::Required => FullDocumentType::Required,
-                FullDocumentMode::UpdateLookup => FullDocumentType::UpdateLookup,
-            },
-        );
-        let resume_after = match start {
-            Start::After(token) => Some(token),
-            _ => None,
-        };
-        if let Some(stage) = server_filter(&self.options.database, filter, resume_after) {
-            watch = watch.pipeline([stage]);
-        }
-        watch = match start {
-            Start::Now => watch,
-            Start::After(token) => watch.resume_after(token.clone()),
-            Start::At(time) => watch.start_at_operation_time(*time),
-        };
-        watch.await.map_err(map_mongo)
-    }
-
-    async fn deliver<RowFn, TxnFn>(
+    async fn deliver<RowFn, DeliveryFn>(
         &mut self,
         emit: Emit,
         on_row: &mut RowFn,
-        on_txn: &mut TxnFn,
+        on_delivery: &mut DeliveryFn,
     ) -> Result<bool>
     where
         RowFn: FnMut(CloudEvent) -> Result<()>,
-        TxnFn: FnMut(CommittedTransaction) -> Result<()>,
+        DeliveryFn: FnMut(Delivery) -> Result<()>,
     {
         let stop = emit.stop;
         let commit = emit.txn.ends_transaction();
         let source_id = self.config.source_id.clone();
-        match self.config.delivery_unit {
-            DeliveryUnit::Row => {
+        // A commit with nothing in it is the stream moving on: writes the
+        // server-side filter left out, or an idle stream's new token.
+        let nothing_in_it =
+            emit.txn.part.is_none() && emit.txn.events.is_empty() && emit.txn.control.is_empty();
+        match (self.config.delivery_unit, emit.txn.position.as_ref()) {
+            (DeliveryUnit::Row, _) => {
                 for event in emit.txn.events {
                     on_row(event)?;
                 }
@@ -289,18 +284,18 @@ impl MongoChangeStreamSource {
                     on_row(control_event(control, &source_id))?;
                 }
             }
-            DeliveryUnit::Transaction => on_txn(emit.txn.clone())?,
+            (DeliveryUnit::Transaction, Some(position)) if nothing_in_it => {
+                on_delivery(Delivery::Progress {
+                    position: position.clone(),
+                })?;
+            }
+            (DeliveryUnit::Transaction, _) => on_delivery(Delivery::Commit(emit.txn.clone()))?,
         }
         // A part that is not the last is not a commit: a restart reads its transaction again.
-        if let Some(position) = emit.txn.position.filter(|_| commit) {
-            let cp = Checkpoint {
-                adapter: crate::checkpoint::ADAPTER.into(),
-                payload: position.after,
-            };
-            if let Some(store) = self.checkpoint_store.as_mut() {
-                store.save(&cp).await?;
+        if self.config.checkpoint == CheckpointMode::OnOk {
+            if let Some(position) = emit.txn.position.as_ref().filter(|_| commit) {
+                self.save_position(position).await?;
             }
-            self.checkpoint = Some(cp);
         }
         if stop {
             let subject = emit
@@ -315,6 +310,150 @@ impl MongoChangeStreamSource {
     }
 }
 
+/// The change stream, read apart from the consumer.
+struct Reader {
+    database: Database,
+    options: MongoSourceOptions,
+    source_id: String,
+    payload_mode: PayloadMode,
+    include: IncludeList,
+    grouper: TxnGrouper,
+    start: Start,
+    queue: Arc<QueueBytes>,
+    tx: tokio::sync::mpsc::Sender<Result<Emit>>,
+}
+
+impl Reader {
+    async fn run(mut self) {
+        let tx = self.tx.clone();
+        if let Err(err) = self.read().await {
+            let _ = tx.send(Err(err)).await;
+        }
+    }
+
+    /// Ends when the stream does, on a control event that stops it, or when
+    /// the consumer is gone.
+    async fn read(&mut self) -> Result<()> {
+        let name = self.options.database.clone();
+        let mut open = in_this_database(&name, &self.include.snapshot_filter());
+        let mut stream = open_stream(&self.database, &self.options, &open, &self.start).await?;
+        self.include.set_in_effect(Some(open.clone()));
+        let _in_effect = InEffect(self.include.clone());
+        // The last place read from the server: an event, or the end of an empty batch.
+        let mut last_read: Option<ResumeToken> = None;
+
+        loop {
+            // TxnGrouper pins this filter when the group starts. Later events in the group ignore a newer list.
+            let filter = self.include.snapshot_filter();
+            let wanted = in_this_database(&name, &filter);
+            if !covers(&open, &wanted) {
+                // The list gained a collection the server leaves out. Open the stream again
+                // where this one stopped reading, with the wider filter: what follows that
+                // place is sent once, and nothing of it is skipped.
+                if let Some(token) = last_read.clone().or_else(|| stream.resume_token()) {
+                    self.start = Start::After(token);
+                }
+                stream = open_stream(&self.database, &self.options, &wanted, &self.start).await?;
+                open = wanted;
+                tracing::info!(
+                    database = %name,
+                    "change stream opened again with a wider include list"
+                );
+            }
+            // What is delivered from here: what the server sends, judged by the
+            // list taken above (and an open transaction by the list it started
+            // with). A list replaced while the read below waits for the server
+            // is not used for what that read returns, so it is reported only
+            // at the next turn; reporting the server's filter alone let an
+            // embedder start its copy while the change after it was still
+            // judged by the old list and dropped.
+            self.include
+                .set_in_effect(Some(delivered(&open, &filter, self.grouper.pinned())));
+            let emits = match stream.next_if_any().await.map_err(map_mongo)? {
+                Some(event) => {
+                    last_read = Some(event.id.clone());
+                    let incoming =
+                        map_change(raw_change(event)?, &self.source_id, self.payload_mode);
+                    self.grouper.push(incoming, &filter)
+                }
+                None => {
+                    if !stream.is_alive() {
+                        return Ok(());
+                    }
+                    let token = stream.resume_token();
+                    if token.is_some() {
+                        last_read = token.clone();
+                    }
+                    let token = token.and_then(|t| token_json(&t).ok());
+                    self.grouper.on_batch_boundary(token)
+                }
+            };
+            for emit in emits {
+                if !self.hand_over(emit).await {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Wait for room in the queue and pass one delivery on. False when reading
+    /// is over: the consumer is gone, or the delivery ends the stream.
+    async fn hand_over(&self, emit: Emit) -> bool {
+        let stop = emit.stop;
+        let bytes = delivery_bytes(&emit.txn);
+        let queue = Arc::clone(&self.queue);
+        let room = tokio::task::spawn_blocking(move || queue.reserve(bytes)).await;
+        if !matches!(room, Ok(Ok(()))) {
+            return false;
+        }
+        self.tx.send(Ok(emit)).await.is_ok() && !stop
+    }
+}
+
+/// The subjects whose changes reach the consumer: sent by the server (`open`),
+/// and allowed by the list the reader judges events by (`taken`, and the list
+/// an open transaction was started with).
+fn delivered(
+    open: &IncludeFilter,
+    taken: &IncludeFilter,
+    pinned: Option<&IncludeFilter>,
+) -> IncludeFilter {
+    let both = open.both(taken);
+    match pinned {
+        Some(pinned) => both.both(pinned),
+        None => both,
+    }
+}
+
+async fn open_stream(
+    database: &Database,
+    options: &MongoSourceOptions,
+    filter: &IncludeFilter,
+    start: &Start,
+) -> Result<ChangeStream<ChangeStreamEvent<Document>>> {
+    let mut watch =
+        database
+            .watch()
+            .max_await_time(AWAIT)
+            .full_document(match options.full_document {
+                FullDocumentMode::Required => FullDocumentType::Required,
+                FullDocumentMode::UpdateLookup => FullDocumentType::UpdateLookup,
+            });
+    let resume_after = match start {
+        Start::After(token) => Some(token),
+        _ => None,
+    };
+    if let Some(stage) = server_filter(&options.database, filter, resume_after) {
+        watch = watch.pipeline([stage]);
+    }
+    watch = match start {
+        Start::Now => watch,
+        Start::After(token) => watch.resume_after(token.clone()),
+        Start::At(time) => watch.start_at_operation_time(*time),
+    };
+    watch.await.map_err(map_mongo)
+}
+
 fn control_event(control: &ControlEvent, source_id: &str) -> CloudEvent {
     control.to_cloud_event(source_id, serde_json::Map::new())
 }
@@ -326,7 +465,7 @@ fn raw_change(event: ChangeStreamEvent<Document>) -> Result<RawChange> {
         i: ts.increment,
     });
     let txn_key = match (&event.lsid, event.txn_number) {
-        (Some(lsid), Some(n)) => Some(format!("{}:{n}", document_to_json(lsid))),
+        (Some(lsid), Some(n)) => Some(format!("{}:{n}", identity_text(lsid))),
         _ => None,
     };
     let (db, coll) = match &event.ns {
@@ -353,8 +492,8 @@ fn raw_change(event: ChangeStreamEvent<Document>) -> Result<RawChange> {
         coll,
         to_db,
         to_coll,
-        document_key: event.document_key.as_ref().map(document_to_json),
-        full_document: event.full_document.map(document_to_json_owned),
+        document_key: event.document_key.as_ref().map(document_image),
+        full_document: event.full_document.as_ref().map(document_image),
         txn_key,
         resume_token,
         cluster_time,
@@ -404,24 +543,154 @@ impl ChangeSource for MongoChangeStreamSource {
         self.run_capture(on_event, |_| Ok(())).await
     }
 
-    async fn run_transactions<F>(&mut self, on_txn: F) -> Result<()>
+    async fn run_deliveries<F>(&mut self, on_delivery: F) -> Result<()>
     where
-        F: FnMut(CommittedTransaction) -> Result<()> + Send,
+        F: FnMut(Delivery) -> Result<()> + Send,
     {
         if self.config.delivery_unit != DeliveryUnit::Transaction {
             return Err(Error::Source(
-                "run_transactions() requires source.delivery_unit = transaction".into(),
+                "run_deliveries() requires source.delivery_unit = transaction".into(),
             ));
         }
-        self.run_capture(|_| Ok(()), on_txn).await
+        self.run_capture(|_| Ok(()), on_delivery).await
+    }
+
+    async fn gate(&self) -> Result<GateReport> {
+        let client = Client::with_uri_str(&self.options.uri)
+            .await
+            .map_err(map_mongo)?;
+        validate_capture_gates(
+            &client,
+            &self.options.database,
+            &self.config.include_tables,
+            self.options.full_document,
+        )
+        .await
+    }
+
+    fn confirm(&self) -> Confirm {
+        self.confirm.clone()
+    }
+
+    fn covers(&self, at: &SourcePosition, target: &SourcePosition) -> Result<bool> {
+        crate::covers_position(at, target)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ce_stream_core::event::TableRef;
+    use ce_stream_core::event::{ChangeOp, TableRef};
+    use ce_stream_core::transaction::CommittedTransaction;
     use std::collections::HashSet;
+
+    fn source(unit: DeliveryUnit, checkpoint: CheckpointMode) -> MongoChangeStreamSource {
+        MongoChangeStreamSource {
+            options: MongoSourceOptions {
+                uri: String::new(),
+                database: "app".into(),
+                full_document: FullDocumentMode::Required,
+            },
+            config: SourceConfig {
+                source_id: "mongo://t".into(),
+                delivery_unit: unit,
+                checkpoint,
+                ..Default::default()
+            },
+            checkpoint: None,
+            checkpoint_store: None,
+            skip_gate_check: true,
+            include: IncludeList::default(),
+            confirm: new_confirm(),
+        }
+    }
+
+    fn position(token: &str) -> SourcePosition {
+        SourcePosition {
+            adapter: crate::checkpoint::ADAPTER.into(),
+            at: serde_json::json!({ "resume_token": { "_data": token } }),
+            after: serde_json::json!({ "resume_token": { "_data": token } }),
+        }
+    }
+
+    fn idle(token: &str) -> Emit {
+        Emit {
+            stop: false,
+            txn: CommittedTransaction {
+                position: Some(position(token)),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn with_a_row(token: &str) -> Emit {
+        let mut emit = idle(token);
+        emit.txn.events.push(CloudEvent::row_change(
+            "mongo://t",
+            &TableRef::new("app", "orders"),
+            ChangeOp::Insert,
+            serde_json::json!({ "op": "insert" }),
+            serde_json::Map::new(),
+        ));
+        emit
+    }
+
+    #[tokio::test]
+    async fn a_commit_with_nothing_in_it_is_a_position_passed() {
+        let mut src = source(DeliveryUnit::Transaction, CheckpointMode::OnOk);
+        let mut got = Vec::new();
+        src.deliver(idle("a"), &mut |_| Ok(()), &mut |d| {
+            got.push(d);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        src.deliver(with_a_row("b"), &mut |_| Ok(()), &mut |d| {
+            got.push(d);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(matches!(got[0], Delivery::Progress { .. }));
+        assert!(matches!(got[1], Delivery::Commit(_)));
+        // Either way the checkpoint moved on the callback's Ok.
+        assert_eq!(
+            src.checkpoint.unwrap().payload["resume_token"]["_data"],
+            "b"
+        );
+    }
+
+    #[tokio::test]
+    async fn row_mode_delivers_no_position_and_still_moves_the_checkpoint() {
+        let mut src = source(DeliveryUnit::Row, CheckpointMode::OnOk);
+        let mut rows: Vec<CloudEvent> = Vec::new();
+        src.deliver(
+            idle("a"),
+            &mut |ev| {
+                rows.push(ev);
+                Ok(())
+            },
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(rows.is_empty());
+        assert!(src.checkpoint.is_some());
+    }
+
+    #[tokio::test]
+    async fn on_confirm_a_delivery_moves_no_checkpoint() {
+        let mut src = source(DeliveryUnit::Transaction, CheckpointMode::OnConfirm);
+        src.deliver(with_a_row("a"), &mut |_| Ok(()), &mut |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(src.checkpoint.is_none());
+        src.save_position(&position("a")).await.unwrap();
+        assert_eq!(
+            src.checkpoint.unwrap().payload["resume_token"]["_data"],
+            "a"
+        );
+    }
 
     fn only(subjects: &[&str]) -> IncludeFilter {
         IncludeFilter::Only(
@@ -498,6 +767,24 @@ mod tests {
         ));
         assert!(!covers(&open, &IncludeFilter::All));
         assert!(covers(&IncludeFilter::All, &only(&["app.late"])));
+    }
+
+    /// A collection the server already sends (an earlier table had it) is in
+    /// effect only once the reader judges events by a list that has it: a list
+    /// replaced while the reader waits for the server is not the one the
+    /// waiting read is judged by (lost document, AxialDB lab, 2026-11-15).
+    #[test]
+    fn a_collection_is_in_effect_only_once_the_reader_takes_the_list_that_has_it() {
+        let open = in_this_database("app", &only(&["app.orders", "app.late"]));
+        let before = only(&["app.orders"]);
+        let after = only(&["app.orders", "app.late"]);
+        assert!(!delivered(&open, &before, None).row_allowed("app.late"));
+        assert!(delivered(&open, &after, None).row_allowed("app.late"));
+        // A transaction started under the old list is judged by it to its end.
+        assert!(!delivered(&open, &after, Some(&before)).row_allowed("app.late"));
+        assert!(delivered(&open, &after, Some(&before)).row_allowed("app.orders"));
+        // The server's filter still bounds it.
+        assert!(!delivered(&open, &only(&["app.other"]), None).row_allowed("app.other"));
     }
 
     #[test]

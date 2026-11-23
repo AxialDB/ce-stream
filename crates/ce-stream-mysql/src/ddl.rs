@@ -1,6 +1,7 @@
 //! DDL classification and CloudEvent mapping (`io.ce-stream.mysql.ddl`).
 
-use ce_stream_core::transaction::DdlStatement;
+use ce_stream_core::event::TableRef;
+use ce_stream_core::transaction::{ControlEvent, ControlKind, DdlStatement};
 use ce_stream_core::CloudEvent;
 
 pub const DDL_CE_TYPE: &str = "io.ce-stream.mysql.ddl";
@@ -78,6 +79,195 @@ pub fn query_kind(query: &str) -> QueryKind {
     }
 }
 
+/// One word or quoted name of a statement, and what follows it.
+fn next_token(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start();
+    let first = text.chars().next()?;
+    if first == '`' {
+        let mut name = String::new();
+        let mut rest = &text[1..];
+        loop {
+            let end = rest.find('`')?;
+            name.push_str(&rest[..end]);
+            rest = &rest[end + 1..];
+            // A doubled backquote is a backquote in the name.
+            match rest.strip_prefix('`') {
+                Some(after) => {
+                    name.push('`');
+                    rest = after;
+                }
+                None => return Some((name, rest)),
+            }
+        }
+    }
+    if ",.;()=".contains(first) {
+        return Some((first.to_string(), &text[first.len_utf8()..]));
+    }
+    let end = text
+        .find(|c: char| c.is_whitespace() || ",.;()=`".contains(c))
+        .unwrap_or(text.len());
+    Some((text[..end].to_string(), &text[end..]))
+}
+
+fn next_is<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let (token, rest) = next_token(text)?;
+    token.eq_ignore_ascii_case(word).then_some(rest)
+}
+
+fn skip_if_exists(text: &str) -> &str {
+    next_is(text, "IF")
+        .and_then(|rest| next_is(rest, "EXISTS"))
+        .unwrap_or(text)
+}
+
+/// `db.t` or `t`, in the statement's default database.
+fn next_table<'a>(schema: &str, text: &'a str) -> Option<(TableRef, &'a str)> {
+    let (first, rest) = next_token(text)?;
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let (table, rest) = next_token(after_dot)?;
+        return Some((TableRef::new(first, table), rest));
+    }
+    Some((TableRef::new(schema, first), rest))
+}
+
+fn control(kind: ControlKind, subject: TableRef) -> ControlEvent {
+    ControlEvent {
+        kind,
+        subject,
+        identity: None,
+    }
+}
+
+/// The typed controls a DDL statement means, beside its text. A statement this
+/// does not read gives none: the text is there for the consumer.
+pub fn ddl_controls(schema: &str, query: &str) -> Vec<ControlEvent> {
+    read_controls(schema, statement_start(query)).unwrap_or_default()
+}
+
+fn read_controls(schema: &str, text: &str) -> Option<Vec<ControlEvent>> {
+    let mut out = Vec::new();
+    let (verb, rest) = next_token(text)?;
+    match verb.to_ascii_uppercase().as_str() {
+        "DROP" => {
+            let (what, rest) = next_token(rest)?;
+            match what.to_ascii_uppercase().as_str() {
+                "TABLE" => {
+                    let mut rest = skip_if_exists(rest);
+                    loop {
+                        let (table, after) = next_table(schema, rest)?;
+                        out.push(control(ControlKind::Dropped, table));
+                        match after.trim_start().strip_prefix(',') {
+                            Some(more) => rest = more,
+                            None => break,
+                        }
+                    }
+                }
+                "DATABASE" | "SCHEMA" => {
+                    let (name, _) = next_token(skip_if_exists(rest))?;
+                    out.push(control(
+                        ControlKind::DatabaseDropped,
+                        TableRef::new(name, ""),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        "RENAME" => {
+            let mut rest = next_is(rest, "TABLE").or_else(|| next_is(rest, "TABLES"))?;
+            loop {
+                let (from, after) = next_table(schema, rest)?;
+                let after = next_is(after, "TO")?;
+                let (to, after) = next_table(schema, after)?;
+                out.push(control(ControlKind::Renamed { to }, from));
+                match after.trim_start().strip_prefix(',') {
+                    Some(more) => rest = more,
+                    None => break,
+                }
+            }
+        }
+        "TRUNCATE" => {
+            let rest = next_is(rest, "TABLE").unwrap_or(rest);
+            let (table, _) = next_table(schema, rest)?;
+            out.push(control(ControlKind::Truncated, table));
+        }
+        "ALTER" => {
+            let rest = next_is(rest, "TABLE")?;
+            let (table, mut words) = next_table(schema, rest)?;
+            let mut renamed = None;
+            let mut other = false;
+            let mut depth = 0i32;
+            let mut at_clause = true;
+            while let Some((token, after)) = next_token(words) {
+                words = after;
+                match token.as_str() {
+                    "(" => depth += 1,
+                    ")" => depth -= 1,
+                    "," if depth == 0 => {
+                        at_clause = true;
+                        continue;
+                    }
+                    ";" => break,
+                    _ if at_clause && depth == 0 => {
+                        if token.eq_ignore_ascii_case("RENAME") {
+                            let target = next_is(words, "TO")
+                                .or_else(|| next_is(words, "AS"))
+                                .unwrap_or(words);
+                            let (word, _) = next_token(target)?;
+                            let inside = ["COLUMN", "INDEX", "KEY"]
+                                .iter()
+                                .any(|w| word.eq_ignore_ascii_case(w));
+                            if inside {
+                                other = true;
+                            } else {
+                                let (to, after) = next_table(schema, target)?;
+                                renamed = Some(to);
+                                words = after;
+                            }
+                        } else {
+                            other = true;
+                        }
+                    }
+                    _ => {}
+                }
+                at_clause = false;
+            }
+            if other || renamed.is_none() {
+                out.push(control(ControlKind::DefinitionChanged, table.clone()));
+            }
+            if let Some(to) = renamed {
+                out.push(control(ControlKind::Renamed { to }, table));
+            }
+        }
+        _ => {}
+    }
+    Some(out)
+}
+
+/// An XA statement as the binlog holds it. The id is the text after the verb,
+/// `X'74776f',X'',1`, the same in each of a transaction's statements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XaStatement {
+    Start(String),
+    Commit(String),
+    Rollback(String),
+}
+
+pub fn xa_statement(query: &str) -> Option<XaStatement> {
+    let text = statement_start(query).trim_end().trim_end_matches(';');
+    let id_after = |verb: &str| -> Option<String> {
+        let head = text.get(..verb.len())?;
+        head.eq_ignore_ascii_case(verb)
+            .then(|| text[verb.len()..].trim().to_string())
+    };
+    if let Some(id) = id_after("XA START ").or_else(|| id_after("XA BEGIN ")) {
+        Some(XaStatement::Start(id))
+    } else if let Some(id) = id_after("XA COMMIT ") {
+        Some(XaStatement::Commit(id))
+    } else {
+        id_after("XA ROLLBACK ").map(XaStatement::Rollback)
+    }
+}
+
 /// `CREATE TABLE ... SELECT` is logged as `CREATE TABLE ... START
 /// TRANSACTION`, followed by the rows and the commit: the statement opens a
 /// transaction instead of being one.
@@ -122,6 +312,120 @@ pub fn ddl_cloud_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kinds(query: &str) -> Vec<(ControlKind, String)> {
+        ddl_controls("app", query)
+            .into_iter()
+            .map(|c| (c.kind, c.subject.as_subject()))
+            .collect()
+    }
+
+    #[test]
+    fn a_drop_names_each_table_in_its_default_database() {
+        assert_eq!(
+            kinds("DROP TABLE IF EXISTS `t1`, other.`t 2` /* generated by server */"),
+            [
+                (ControlKind::Dropped, "app.t1".to_string()),
+                (ControlKind::Dropped, "other.t 2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rename_says_where_each_table_went() {
+        assert_eq!(
+            kinds("RENAME TABLE a TO b, x.c TO y.d"),
+            [
+                (
+                    ControlKind::Renamed {
+                        to: TableRef::new("app", "b")
+                    },
+                    "app.a".to_string()
+                ),
+                (
+                    ControlKind::Renamed {
+                        to: TableRef::new("y", "d")
+                    },
+                    "x.c".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_and_drop_database() {
+        assert_eq!(
+            kinds("TRUNCATE TABLE `t`"),
+            [(ControlKind::Truncated, "app.t".to_string())]
+        );
+        assert_eq!(
+            kinds("TRUNCATE t"),
+            [(ControlKind::Truncated, "app.t".to_string())]
+        );
+        let dropped = ddl_controls("app", "DROP DATABASE IF EXISTS `old`");
+        assert_eq!(dropped[0].kind, ControlKind::DatabaseDropped);
+        assert_eq!(dropped[0].subject, TableRef::new("old", ""));
+    }
+
+    #[test]
+    fn an_alter_changes_the_definition_and_may_rename() {
+        assert_eq!(
+            kinds("ALTER TABLE t ADD COLUMN x INT, DROP COLUMN y"),
+            [(ControlKind::DefinitionChanged, "app.t".to_string())]
+        );
+        assert_eq!(
+            kinds("ALTER TABLE t RENAME TO u"),
+            [(
+                ControlKind::Renamed {
+                    to: TableRef::new("app", "u")
+                },
+                "app.t".to_string()
+            )]
+        );
+        let both = kinds("ALTER TABLE t ADD COLUMN x INT, RENAME AS z.u");
+        assert_eq!(both[0].0, ControlKind::DefinitionChanged);
+        assert_eq!(
+            both[1].0,
+            ControlKind::Renamed {
+                to: TableRef::new("z", "u")
+            }
+        );
+        // These rename something inside the table.
+        assert_eq!(
+            kinds("ALTER TABLE t RENAME COLUMN a TO b"),
+            [(ControlKind::DefinitionChanged, "app.t".to_string())]
+        );
+        assert_eq!(
+            kinds("ALTER TABLE t RENAME INDEX a TO b"),
+            [(ControlKind::DefinitionChanged, "app.t".to_string())]
+        );
+    }
+
+    #[test]
+    fn what_it_cannot_read_gives_no_control() {
+        assert!(kinds("CREATE TABLE t (id INT)").is_empty());
+        assert!(kinds("DROP INDEX i ON t").is_empty());
+        assert!(kinds("RENAME USER a TO b").is_empty());
+        assert!(kinds("").is_empty());
+    }
+
+    #[test]
+    fn xa_statements_carry_their_id() {
+        assert_eq!(
+            xa_statement("XA START X'61',X'',1"),
+            Some(XaStatement::Start("X'61',X'',1".into()))
+        );
+        assert_eq!(
+            xa_statement("xa commit X'61',X'',1;"),
+            Some(XaStatement::Commit("X'61',X'',1".into()))
+        );
+        assert_eq!(
+            xa_statement("XA ROLLBACK X'61',X'',1"),
+            Some(XaStatement::Rollback("X'61',X'',1".into()))
+        );
+        assert_eq!(xa_statement("XA END X'61',X'',1"), None);
+        assert_eq!(xa_statement("SELECT 1"), None);
+    }
 
     #[test]
     fn recognizes_ddl_prefixes() {

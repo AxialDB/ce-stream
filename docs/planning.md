@@ -128,14 +128,14 @@ Location: [`scripts/perf/`](../scripts/perf/). Spec: [`docs/perf-harness.md`](pe
 
 ---
 
-## Phase 6 — Multi-DB adapters — **MongoDB shipped in v0.4.0; others deferred**
+## Phase 6 — Multi-DB adapters — **MongoDB shipped in v0.4.0, PostgreSQL in v0.6.0; others deferred**
 
 Same `ChangeSource` / CloudEvent envelope:
 
 | Adapter | Mechanism | Status |
 |---------|-----------|--------|
 | `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **Shipped** in v0.4.0 ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
-| `ce-stream-postgres` | Logical decoding / replication protocol (sketch) | Deferred |
+| `ce-stream-postgres` | Logical replication (`pgoutput`), PostgreSQL 17+ | **Shipped** in v0.6.0 ([#19](https://github.com/AxialDB/ce-stream/issues/19), [`issues/19.md`](issues/19.md)) |
 | `ce-stream-sqlite` | update hooks / session (different shape, sketch) | Deferred |
 | MSSQL | Prefer consuming **CES** if available; not a binlog clone (sketch) | Deferred |
 
@@ -145,11 +145,13 @@ Same `ChangeSource` / CloudEvent envelope:
 
 **Decision (2026-10-01):** Pull MongoDB back from Phase 6 ([#5](https://github.com/AxialDB/ce-stream/issues/5)). AxialDB needs MongoDB CDC without Kafka or Debezium, and change streams fit the existing `ChangeSource` and commit-boundary model. Scope: MongoDB 8.0+ replica sets, no sharded clusters. Postgres, SQLite, and MSSQL stay deferred.
 
+**Decision (2026-10-30):** Pull PostgreSQL back from Phase 6 and give every source one contract in `ce-stream-core` ([#19](https://github.com/AxialDB/ce-stream/issues/19), [`issues/19.md`](issues/19.md)). Its first consumer, AxialDB, was carrying a per-host module for each difference, and PostgreSQL would have added a third. There is no external consumer yet, so the old shapes go in one step. Nothing is released until AxialDB has built its hosts on it. SQLite and MSSQL stay deferred.
+
 ---
 
 ## Out of scope (until explicitly pulled in)
 
-- Other DB engines besides MongoDB (Phase 6 — deferred)
+- Other DB engines besides MongoDB and PostgreSQL (Phase 6 — deferred)
 - Competing with Fivetran on quietness as a product claim (measure; don't market until proven)
 - In-process MySQL transmit/trans observers as primary capture
 - AxialDB coupling (optional subscriber later; separate repo)
@@ -165,7 +167,9 @@ Phase 0 → 1 (spike) → 2 (MVP) → 3 (HTTP E2E) → 4 (harden)
   → 4.5 (perf harness) → 5 (Avro)  [done]
   → OSS readiness / v0.1 tag
   → v0.2.0 (#1 Gate 0) → v0.3.0 (#3 live include list)
-  → Phase 6: MongoDB (#5, v0.4.0); other DBs only if un-deferred
+  → Phase 6: MongoDB (#5, v0.4.0)
+  → v0.4.2, v0.4.3, v0.5.0 (#16 long transactions in parts)
+  → one contract for every source, PostgreSQL (#19, v0.6.0); other DBs only if un-deferred
 ```
 
-**Now:** tag v0.4.0 after merge, then publish to crates.io in the order in [`releasing.md`](releasing.md#cratesio). Postgres, SQLite, and MSSQL stay deferred.
+**Now:** [#19](https://github.com/AxialDB/ce-stream/issues/19) shipped in v0.6.0, after AxialDB built its MySQL, MongoDB and PostgreSQL hosts on it. SQLite and MSSQL stay deferred.

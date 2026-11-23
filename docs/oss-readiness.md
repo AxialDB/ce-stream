@@ -4,7 +4,7 @@
 
 Lean OSS MVP (v0.1) is in-repo: `LICENSE`, `NOTICE`, `CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates, `CHANGELOG.md`, Discussions forms, CI (`fmt`/`clippy`/tests, **no MySQL**).
 
-**v0.2.0 delivery:** GitHub Release binaries from [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — **Linux x86_64** and **Windows x86_64** as equal first-class targets. Tag `v*` publishes archives + `SHA256SUMS`. Crash harness and live capture stay **lab-only**. crates.io still later.
+**v0.2.0 delivery:** GitHub Release binaries from [`.github/workflows/release.yml`](../.github/workflows/release.yml) — **Linux x86_64** and **Windows x86_64** as equal first-class targets. Tag `v*` publishes archives + `SHA256SUMS`. Crash harness and live capture stay **lab-only**. crates.io still later.
 
 The rest of this file is the original v0.1 gap analysis (historical). Prefer [`releasing.md`](releasing.md) for how to cut a release.
 

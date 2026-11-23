@@ -4,12 +4,14 @@
 #![allow(clippy::double_must_use)]
 
 mod binlog_dispatch;
+pub mod charset;
+mod columns;
 mod ddl;
 mod dispatch;
 mod gate;
 mod gtid;
+mod json_text;
 mod map;
-mod queue;
 mod txn_buffer;
 
 use std::collections::HashMap;
@@ -20,20 +22,48 @@ use std::time::Duration;
 use async_trait::async_trait;
 use binlog_dispatch::{dispatch_binlog_event, BinlogDispatchCtx, TableMap};
 use ce_stream_core::{
+    delivery::{CheckpointMode, Confirm, Delivery, SeedCut},
     error::{Error, Result},
     event::{CloudEvent, PayloadMode},
+    gate::GateReport,
+    include::IncludeList,
+    queue::{self, QueueBytes},
     source::{ChangeSource, DeliveryUnit, SourceConfig},
-    transaction::CommittedTransaction,
+    transaction::SourcePosition,
     Checkpoint, CheckpointStore,
 };
 use tracing::info;
 
-/// Re-export for v0.3 callers. Import from `ce_stream_core` instead; removed in v0.5.
-pub use ce_stream_core::include::IncludeList;
 pub use ddl::DDL_CE_TYPE;
-pub use dispatch::{deliver_committed, DeliverCtx};
-pub use gate::{validate_capture_gates, GateReport};
-pub use gtid::ExecutedSet;
+pub use dispatch::{deliver_committed, deliver_progress, DeliverCtx};
+pub use gate::{validate_capture_gates, CaptureServer};
+pub use gtid::{
+    commit_gtid, commit_gtid_set_after, commit_position, covers_position, is_purged_refusal,
+    purged_missing, seed_cut_position, subtract_gtid_sets, union_gtid_sets, ExecutedSet,
+};
+
+/// What the server at `options` can no longer send to a consumer at this
+/// checkpoint: transactions it has purged that the checkpoint holds in
+/// neither its `gtid` nor its `baseline_gtid`. Empty when it can serve it, as
+/// when the checkpoint has no baseline (it cannot be judged). A consumer with
+/// several servers asks each before it starts a stream; a stream started on a
+/// server that cannot serve is [`Error::HistoryLost`].
+pub async fn server_missing(
+    options: &MysqlSourceOptions,
+    checkpoint: &Checkpoint,
+) -> Result<String> {
+    let text = |key: &str| {
+        checkpoint
+            .payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (gtid, baseline) = (text("gtid"), text("baseline_gtid"));
+    let purged = gate::fetch_global_gtid(&options.connection_url(), "gtid_purged").await?;
+    purged_missing(&gtid, Some(baseline.as_str()), &purged)
+}
 pub use map::column_value_to_json;
 pub use txn_buffer::TxnBuffer;
 
@@ -78,6 +108,36 @@ pub struct MysqlBinlogSource {
     /// If never mutated, capture start copies [`SourceConfig::include_tables`].
     /// Updates take effect at the next GTID (best-effort; no ack).
     pub include: IncludeList,
+    /// The handle for [`CheckpointMode::OnConfirm`]; from [`new_confirm`].
+    pub confirm: Confirm,
+}
+
+/// A [`Confirm`] that orders positions as this adapter does.
+pub fn new_confirm() -> Confirm {
+    Confirm::new(gtid::ADAPTER, covers_position)
+}
+
+/// The seed cut on MySQL: a GTID set names finished transactions, so there is
+/// nothing to wait for. See [`gtid::seed_cut_position`].
+pub struct MysqlSeedCut {
+    /// The server the seed is copied from, on the consumer's account.
+    pub seed: MysqlSourceOptions,
+    /// The server the stream reads. Another one when the stream reads a replica.
+    pub capture: MysqlSourceOptions,
+}
+
+#[async_trait]
+impl SeedCut for MysqlSeedCut {
+    async fn mark(&self) -> Result<SourcePosition> {
+        let executed =
+            gate::fetch_global_gtid(&self.seed.connection_url(), "gtid_executed").await?;
+        let capture = gate::fetch_capture_server(&self.capture.connection_url()).await?;
+        gtid::seed_cut_position(&executed, &capture)
+    }
+
+    async fn wait_settled(&self, _mark: &SourcePosition) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl MysqlBinlogSource {
@@ -133,25 +193,50 @@ impl MysqlBinlogSource {
         let baseline = cp.payload.get("baseline_gtid").and_then(|v| v.as_str());
         let url = self.options.connection_url();
         let purged = gate::fetch_global_gtid(&url, "gtid_purged").await?;
-        let handshake = ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)?;
+        if baseline.map_or(true, |s| s.trim().is_empty()) {
+            tracing::warn!(
+                "resuming from a checkpoint with no baseline_gtid (written before 0.2.0): \
+                 transactions the server purged cannot be told from ones it never sent"
+            );
+        }
+        let handshake = ExecutedSet::binlog_handshake_gtid_set(checkpoint_gtid, baseline, &purged)
+            .map_err(|err| match err {
+                Error::HistoryLost(why) => Error::HistoryLost(format!(
+                    "{}:{}: {why}",
+                    self.options.host, self.options.port
+                )),
+                other => other,
+            })?;
         info!(handshake_gtid = %handshake, "resuming binlog from checkpoint");
         Ok(StartPosition::Gtid(handshake))
     }
 
-    async fn run_capture<RowFn, TxnFn>(
+    /// A confirmed position: the checkpoint moves to it, keeping what else the
+    /// checkpoint holds.
+    async fn save_confirmed(&mut self, position: &SourcePosition) -> Result<()> {
+        let set = position
+            .after
+            .get("gtid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        dispatch::persist_gtid_set(set, &mut self.checkpoint_store, &mut self.checkpoint).await
+    }
+
+    async fn run_capture<RowFn, DeliveryFn>(
         &mut self,
         mut on_row: RowFn,
-        mut on_txn: TxnFn,
+        mut on_delivery: DeliveryFn,
     ) -> Result<()>
     where
         RowFn: FnMut(CloudEvent) -> Result<()> + Send,
-        TxnFn: FnMut(CommittedTransaction) -> Result<()> + Send,
+        DeliveryFn: FnMut(Delivery) -> Result<()> + Send,
     {
         let url = self.options.connection_url();
         let server_id = self.options.server_id;
 
         if !self.skip_gate_check {
-            let report = gate::validate_capture_gates(&url).await?;
+            let report = gate::validate_capture_gates(&url).await?.into_result()?;
             for warning in &report.warnings {
                 tracing::warn!(gate_warning = %warning, "capture gate warning");
             }
@@ -178,7 +263,7 @@ impl MysqlBinlogSource {
         } else {
             self.config.queue_max_bytes
         };
-        let queue_bytes = Arc::new(queue::QueueBytes::new(queue_max_bytes as u64));
+        let queue_bytes = Arc::new(QueueBytes::new(queue_max_bytes as u64));
         let queue_bytes_bg = Arc::clone(&queue_bytes);
 
         let executed = Arc::new(tokio::sync::Mutex::new(self.initial_executed_set()?));
@@ -198,9 +283,8 @@ impl MysqlBinlogSource {
             "starting MySQL binlog source"
         );
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<
-            std::result::Result<CommittedTransaction, String>,
-        >(capacity);
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<std::result::Result<Delivery, String>>(capacity);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = Arc::clone(&stop);
         let source_id_delivery = source_id.clone();
@@ -221,31 +305,62 @@ impl MysqlBinlogSource {
             ))
         });
 
+        // Under OnConfirm a delivery moves nothing durable: the executed set
+        // the reader counts from still moves, and the checkpoint on a confirm.
+        let on_confirm = self.config.checkpoint == CheckpointMode::OnConfirm;
+        let mut confirmed = self.confirm.subscribe();
+        let mut no_store: Option<Box<dyn CheckpointStore>> = None;
+        let mut unsaved: Option<Checkpoint> = None;
+
         let result = async {
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Ok(txn) => {
+            loop {
+                let msg = tokio::select! {
+                    msg = rx.recv() => msg,
+                    changed = confirmed.changed(), if on_confirm => {
+                        if changed.is_ok() {
+                            let position = confirmed.borrow_and_update().clone();
+                            if let Some(position) = position {
+                                self.save_confirmed(&position).await?;
+                            }
+                        }
+                        continue;
+                    }
+                };
+                let Some(msg) = msg else {
+                    return Ok(());
+                };
+                let delivery = msg.map_err(Error::Source)?;
+                let mut shared = executed.lock().await;
+                let (store, checkpoint) = if on_confirm {
+                    (&mut no_store, &mut unsaved)
+                } else {
+                    (&mut self.checkpoint_store, &mut self.checkpoint)
+                };
+                let mut ctx = DeliverCtx {
+                    source_id: &source_id_delivery,
+                    delivery_unit,
+                    executed: &mut shared,
+                    checkpoint_store: store,
+                    checkpoint,
+                };
+                match delivery {
+                    Delivery::Commit(txn) => {
                         let bytes = queue::delivery_bytes(&txn);
-                        let mut shared = executed.lock().await;
-                        deliver_committed(
-                            txn,
-                            &mut DeliverCtx {
-                                source_id: &source_id_delivery,
-                                delivery_unit,
-                                executed: &mut shared,
-                                checkpoint_store: &mut self.checkpoint_store,
-                                checkpoint: &mut self.checkpoint,
-                            },
-                            &mut on_row,
-                            &mut on_txn,
-                        )
+                        deliver_committed(txn, &mut ctx, &mut on_row, &mut |txn| {
+                            on_delivery(Delivery::Commit(txn))
+                        })
                         .await?;
                         queue_bytes.release(bytes);
                     }
-                    Err(e) => return Err(Error::Source(e)),
+                    Delivery::Progress { position } => {
+                        deliver_progress(position, &mut ctx, &mut on_delivery).await?;
+                    }
+                    Delivery::Schema(schema) => match delivery_unit {
+                        DeliveryUnit::Row => on_row(schema.to_cloud_event(&source_id_delivery))?,
+                        DeliveryUnit::Transaction => on_delivery(Delivery::Schema(schema))?,
+                    },
                 }
             }
-            Ok(())
         }
         .await;
 
@@ -255,7 +370,17 @@ impl MysqlBinlogSource {
         queue_bytes.close();
         drop(rx);
         if result.is_ok() {
-            let _ = join.await;
+            // The reader's own error ends the queue too: it is the stream's
+            // answer. The server's refusal of a dump whose set lacks what it
+            // purged (error 1236) is the history lost.
+            if let Ok(Err(msg)) = join.await {
+                let at = format!("{}:{}", self.options.host, self.options.port);
+                return Err(if is_purged_refusal(&msg) {
+                    Error::HistoryLost(format!("{at}: {msg}"))
+                } else {
+                    Error::Source(msg)
+                });
+            }
         }
         // After an error the reader ends at its next event or send; the
         // caller gets the error now instead of after the server drops a dump
@@ -279,16 +404,28 @@ impl ChangeSource for MysqlBinlogSource {
         self.run_capture(on_event, |_| Ok(())).await
     }
 
-    async fn run_transactions<F>(&mut self, on_txn: F) -> Result<()>
+    async fn run_deliveries<F>(&mut self, on_delivery: F) -> Result<()>
     where
-        F: FnMut(CommittedTransaction) -> Result<()> + Send,
+        F: FnMut(Delivery) -> Result<()> + Send,
     {
         if self.config.delivery_unit != DeliveryUnit::Transaction {
             return Err(Error::Source(
-                "run_transactions() requires source.delivery_unit = transaction".into(),
+                "run_deliveries() requires source.delivery_unit = transaction".into(),
             ));
         }
-        self.run_capture(|_| Ok(()), on_txn).await
+        self.run_capture(|_| Ok(()), on_delivery).await
+    }
+
+    async fn gate(&self) -> Result<GateReport> {
+        gate::validate_capture_gates(&self.options.connection_url()).await
+    }
+
+    fn confirm(&self) -> Confirm {
+        self.confirm.clone()
+    }
+
+    fn covers(&self, at: &SourcePosition, target: &SourcePosition) -> Result<bool> {
+        covers_position(at, target)
     }
 }
 
@@ -312,8 +449,8 @@ async fn binlog_loop(
     executed: Arc<tokio::sync::Mutex<ExecutedSet>>,
     payload_mode: PayloadMode,
     part_limits: (usize, usize),
-    queue_bytes: Arc<queue::QueueBytes>,
-    tx: tokio::sync::mpsc::Sender<std::result::Result<CommittedTransaction, String>>,
+    queue_bytes: Arc<QueueBytes>,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<Delivery, String>>,
     stop: Arc<AtomicBool>,
 ) -> std::result::Result<(), String> {
     let mut client = BinlogClient::new(url.as_str(), server_id, start)
@@ -362,35 +499,24 @@ async fn binlog_loop(
     Ok(())
 }
 
-/// File-backed checkpoint (GTID JSON in payload).
-pub struct FileCheckpointStore {
-    pub path: std::path::PathBuf,
-}
-
-#[async_trait]
-impl CheckpointStore for FileCheckpointStore {
-    async fn load(&self) -> Result<Option<Checkpoint>> {
-        if !self.path.exists() {
-            return Ok(None);
-        }
-        let bytes = tokio::fs::read(&self.path).await?;
-        let cp: Checkpoint = serde_json::from_slice(&bytes)?;
-        Ok(Some(cp))
-    }
-
-    async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let bytes = serde_json::to_vec_pretty(checkpoint)?;
-        tokio::fs::write(&self.path, bytes).await?;
-        Ok(())
-    }
-}
-
 #[doc(hidden)]
 pub mod test_support {
     pub use crate::binlog_dispatch::{
         dispatch_binlog_event_for_test as dispatch, BinlogDispatchCtx, TableMap,
     };
+    use ce_stream_core::delivery::Delivery;
+    use ce_stream_core::transaction::CommittedTransaction;
+
+    /// A delivery read off the queue, as the commit it stands for: a position
+    /// passed is a commit with nothing in it.
+    pub fn commit_of(delivery: Delivery) -> CommittedTransaction {
+        match delivery {
+            Delivery::Commit(txn) => txn,
+            Delivery::Progress { position } => CommittedTransaction {
+                position: Some(position),
+                ..Default::default()
+            },
+            Delivery::Schema(schema) => panic!("expected a commit, got {schema:?}"),
+        }
+    }
 }

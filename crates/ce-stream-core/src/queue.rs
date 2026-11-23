@@ -1,5 +1,6 @@
-//! The bytes of row data waiting in the queue between the binlog reader and
-//! the consumer (issue #16).
+//! The bytes of row data waiting in the queue between an adapter's reader and
+//! the consumer (issue #16). For adapters with a reader task; an adapter whose
+//! consumer runs on the write path has no queue.
 //!
 //! The queue holds at most `queue_capacity` deliveries. With parts, one
 //! delivery can be `part_max_bytes` of rows, so a slow consumer could have
@@ -9,11 +10,34 @@
 
 use std::sync::{Condvar, Mutex};
 
-use ce_stream_core::event::approx_json_bytes;
-use ce_stream_core::transaction::CommittedTransaction;
+use crate::event::approx_json_bytes;
+use crate::transaction::CommittedTransaction;
+
+/// A source's tasks end with its future, which a consumer can drop at any await (a
+/// `select!`): a reader that went on would hold the connection, and a replication
+/// slot, until the process ends.
+pub struct ReaderTasks {
+    queue: std::sync::Arc<QueueBytes>,
+    tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl ReaderTasks {
+    pub fn new(queue: std::sync::Arc<QueueBytes>, tasks: Vec<tokio::task::AbortHandle>) -> Self {
+        Self { queue, tasks }
+    }
+}
+
+impl Drop for ReaderTasks {
+    fn drop(&mut self) {
+        self.queue.close();
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
 
 /// The row data of a delivery, as a part is measured.
-pub(crate) fn delivery_bytes(txn: &CommittedTransaction) -> u64 {
+pub fn delivery_bytes(txn: &CommittedTransaction) -> u64 {
     txn.events
         .iter()
         .map(|event| approx_json_bytes(&event.data) as u64)
@@ -21,7 +45,7 @@ pub(crate) fn delivery_bytes(txn: &CommittedTransaction) -> u64 {
 }
 
 #[derive(Debug)]
-pub(crate) struct QueueBytes {
+pub struct QueueBytes {
     max: u64,
     /// Bytes in the queue, and whether the consumer is gone.
     state: Mutex<(u64, bool)>,
@@ -29,7 +53,7 @@ pub(crate) struct QueueBytes {
 }
 
 impl QueueBytes {
-    pub(crate) fn new(max: u64) -> Self {
+    pub fn new(max: u64) -> Self {
         Self {
             max: max.max(1),
             state: Mutex::new((0, false)),
@@ -39,7 +63,7 @@ impl QueueBytes {
 
     /// Wait until a delivery of `bytes` fits, and count it in. An error when
     /// the consumer is gone.
-    pub(crate) fn reserve(&self, bytes: u64) -> Result<(), String> {
+    pub fn reserve(&self, bytes: u64) -> Result<(), String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if state.1 {
@@ -54,14 +78,14 @@ impl QueueBytes {
     }
 
     /// The consumer is done with a delivery of `bytes`.
-    pub(crate) fn release(&self, bytes: u64) {
+    pub fn release(&self, bytes: u64) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.0 = state.0.saturating_sub(bytes);
         self.room.notify_all();
     }
 
     /// The consumer is gone: a reader that waits gets an error.
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.1 = true;
         self.room.notify_all();

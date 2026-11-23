@@ -18,10 +18,10 @@ mod options;
 mod seed;
 mod source;
 
-pub use checkpoint::{ClusterTime, MongoCheckpoint};
+pub use checkpoint::{covers_position, ClusterTime, MongoCheckpoint};
 pub use options::FullDocumentMode;
-pub use seed::{note_cluster_time, open_seed_cursor, read_seed_batch, SEED_BATCH};
-pub use source::{MongoChangeStreamSource, MongoSourceOptions};
+pub use seed::{note_cluster_time, open_seed_cursor, read_seed_batch, MongoSeedCut, SEED_BATCH};
+pub use source::{new_confirm, MongoChangeStreamSource, MongoSourceOptions};
 
 /// MongoDB `ChangeStreamHistoryLost`.
 pub const HISTORY_LOST_CODE: i32 = 286;

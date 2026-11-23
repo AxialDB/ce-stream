@@ -37,10 +37,11 @@ jobs:
           -p ce-stream-core
           -p ce-stream-mysql
           -p ce-stream-mongo
+          -p ce-stream-postgres
           -p ce-stream-cli
           -p ce-stream-perf-sink
           --no-deps
           -- -D warnings
 
       - name: cargo test (unit, no MySQL)
-        run: cargo test -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo
+        run: cargo test -p ce-stream-core -p ce-stream-mysql -p ce-stream-mongo -p ce-stream-postgres
