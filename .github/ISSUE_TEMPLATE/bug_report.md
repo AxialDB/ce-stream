@@ -14,8 +14,8 @@ A clear description of the bug.
 
 - ce-stream version / commit:
 - OS:
-- MySQL version (must be 9.x for v1):
-- Capture host role (primary / replica):
+- Source and its version (MySQL 9.x, MongoDB 8.0+ replica set, or PostgreSQL 17+):
+- Capture host role (primary / replica / standby):
 - Sink (`stdout` / `http`) and `format` (`json` / `avro`):
 
 ## Config (redact secrets)
