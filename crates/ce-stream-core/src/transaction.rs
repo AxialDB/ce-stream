@@ -163,7 +163,7 @@ impl CommittedTransaction {
     /// last part of one? Only such a delivery carries the position after the
     /// transaction and may move a checkpoint.
     pub fn ends_transaction(&self) -> bool {
-        self.part.map_or(true, |part| part.last)
+        self.part.is_none_or(|part| part.last)
     }
 }
 

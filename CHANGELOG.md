@@ -73,7 +73,7 @@ Release notes: [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md).
 - MySQL: the commit that delivers an XA transaction's rows carries `prepared_gtid` in its `position.at`, beside `gtid`.
 - MySQL and MongoDB: the gate reports every failure at once, each with its object and fix.
 - CLI: an unknown `source.adapter` names the adapters it has (`mysql`, `mongo`, `postgres`). The health log in transaction mode counts `deliveries_total`, where it counted `commits_total`.
-- The workspace `rust-version` stays 1.75, and `ce-stream-postgres` builds on it. The CLI and `ce-stream-mongo` stay on 1.88.
+- **Breaking (Rust):** every crate declares `rust-version = "1.95"`, the lowest Rust this release was built and tested on. The workspace said 1.75, which its dependencies have not allowed since v0.5.0 (`encoding_rs` and `time` need 1.88); `ce-stream-mongo` and the CLI said 1.88, and `ce-stream-mysql-binlog` said nothing.
 
 ### Notes
 

@@ -1,5 +1,5 @@
 # Vendored from https://github.com/apecloud/mysql-binlog-connector-rust (f7cca8ec / 0.3.4).
-# ce-stream patch: show binary log status (MySQL 9.x only). See PATCHES.md.
+# ce-stream patches: see PATCHES.md.
 
 [package]
 edition = "2021"
@@ -13,6 +13,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/AxialDB/ce-stream"
 homepage = "https://github.com/AxialDB/ce-stream"
 readme = "PATCHES.md"
+rust-version.workspace = true
 
 [lib]
 name = "mysql_binlog_connector_rust"

@@ -17,7 +17,7 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/AxialDB/ce-stream"
 homepage = "https://axialdb.com/"
-rust-version = "1.75"
+rust-version = "1.95"
 
 [workspace.dependencies]
 ce-stream-core = { version = "0.6.0", path = "crates/ce-stream-core" }
