@@ -355,12 +355,20 @@ impl Reader {
                 }
                 stream = open_stream(&self.database, &self.options, &wanted, &self.start).await?;
                 open = wanted;
-                self.include.set_in_effect(Some(open.clone()));
                 tracing::info!(
                     database = %name,
                     "change stream opened again with a wider include list"
                 );
             }
+            // What is delivered from here: what the server sends, judged by the
+            // list taken above (and an open transaction by the list it started
+            // with). A list replaced while the read below waits for the server
+            // is not used for what that read returns, so it is reported only
+            // at the next turn; reporting the server's filter alone let an
+            // embedder start its copy while the change after it was still
+            // judged by the old list and dropped.
+            self.include
+                .set_in_effect(Some(delivered(&open, &filter, self.grouper.pinned())));
             let emits = match stream.next_if_any().await.map_err(map_mongo)? {
                 Some(event) => {
                     last_read = Some(event.id.clone());
@@ -399,6 +407,21 @@ impl Reader {
             return false;
         }
         self.tx.send(Ok(emit)).await.is_ok() && !stop
+    }
+}
+
+/// The subjects whose changes reach the consumer: sent by the server (`open`),
+/// and allowed by the list the reader judges events by (`taken`, and the list
+/// an open transaction was started with).
+fn delivered(
+    open: &IncludeFilter,
+    taken: &IncludeFilter,
+    pinned: Option<&IncludeFilter>,
+) -> IncludeFilter {
+    let both = open.both(taken);
+    match pinned {
+        Some(pinned) => both.both(pinned),
+        None => both,
     }
 }
 
@@ -744,6 +767,24 @@ mod tests {
         ));
         assert!(!covers(&open, &IncludeFilter::All));
         assert!(covers(&IncludeFilter::All, &only(&["app.late"])));
+    }
+
+    /// A collection the server already sends (an earlier table had it) is in
+    /// effect only once the reader judges events by a list that has it: a list
+    /// replaced while the reader waits for the server is not the one the
+    /// waiting read is judged by (lost document, AxialDB lab, 2026-11-15).
+    #[test]
+    fn a_collection_is_in_effect_only_once_the_reader_takes_the_list_that_has_it() {
+        let open = in_this_database("app", &only(&["app.orders", "app.late"]));
+        let before = only(&["app.orders"]);
+        let after = only(&["app.orders", "app.late"]);
+        assert!(!delivered(&open, &before, None).row_allowed("app.late"));
+        assert!(delivered(&open, &after, None).row_allowed("app.late"));
+        // A transaction started under the old list is judged by it to its end.
+        assert!(!delivered(&open, &after, Some(&before)).row_allowed("app.late"));
+        assert!(delivered(&open, &after, Some(&before)).row_allowed("app.orders"));
+        // The server's filter still bounds it.
+        assert!(!delivered(&open, &only(&["app.other"]), None).row_allowed("app.other"));
     }
 
     #[test]

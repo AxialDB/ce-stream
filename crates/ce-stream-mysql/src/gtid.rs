@@ -400,8 +400,8 @@ mod tests {
     #[test]
     fn a_cut_s_baseline_holds_what_the_stream_s_server_purged() {
         let executed = format!("{A}:1-100");
-        let cut = seed_cut_position(&executed, &capture(B, true, &format!("{A}:1-40,{B}:1-3")))
-            .unwrap();
+        let cut =
+            seed_cut_position(&executed, &capture(B, true, &format!("{A}:1-40,{B}:1-3"))).unwrap();
         let baseline = cut.after["baseline_gtid"].as_str().unwrap();
         assert_eq!(
             purged_missing(&executed, Some(baseline), &format!("{A}:1-40,{B}:1-3")).unwrap(),
@@ -565,8 +565,12 @@ mod tests {
         .unwrap();
         assert_eq!(out, format!("{PA}:1-500"));
         assert_eq!(
-            purged_missing(&format!("{PA}:1-500"), Some(&format!("{PA}:1-100")), &format!("{PA}:1-400"))
-                .unwrap(),
+            purged_missing(
+                &format!("{PA}:1-500"),
+                Some(&format!("{PA}:1-100")),
+                &format!("{PA}:1-400")
+            )
+            .unwrap(),
             ""
         );
     }
@@ -584,8 +588,12 @@ mod tests {
         assert!(matches!(err, Error::HistoryLost(_)), "{err}");
         assert!(err.to_string().contains(&format!("{PA}:124-183")), "{err}");
         assert_eq!(
-            purged_missing(&format!("{PA}:1-123"), Some(&format!("{PA}:1-100")), &format!("{PA}:1-183"))
-                .unwrap(),
+            purged_missing(
+                &format!("{PA}:1-123"),
+                Some(&format!("{PA}:1-100")),
+                &format!("{PA}:1-183")
+            )
+            .unwrap(),
             format!("{PA}:124-183")
         );
     }
@@ -601,7 +609,9 @@ mod tests {
             ExecutedSet::binlog_handshake_gtid_set(&checkpoint, Some(&baseline), &purged).unwrap();
         assert_eq!(
             GtidSet::new(&out).unwrap().to_string(),
-            GtidSet::new(&format!("{PA}:1-900,{PB}:1-5")).unwrap().to_string()
+            GtidSet::new(&format!("{PA}:1-900,{PB}:1-5"))
+                .unwrap()
+                .to_string()
         );
     }
 
@@ -609,9 +619,12 @@ mod tests {
     /// cannot tell a loss, and no answer from `purged_missing`.
     #[test]
     fn a_checkpoint_with_no_baseline_keeps_the_old_handshake() {
-        let out =
-            ExecutedSet::binlog_handshake_gtid_set(&format!("{PA}:1-123"), None, &format!("{PA}:1-183"))
-                .unwrap();
+        let out = ExecutedSet::binlog_handshake_gtid_set(
+            &format!("{PA}:1-123"),
+            None,
+            &format!("{PA}:1-183"),
+        )
+        .unwrap();
         assert_eq!(out, format!("{PA}:1-183"));
         assert_eq!(
             purged_missing(&format!("{PA}:1-123"), None, &format!("{PA}:1-183")).unwrap(),

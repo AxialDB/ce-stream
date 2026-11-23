@@ -135,7 +135,7 @@ Same `ChangeSource` / CloudEvent envelope:
 | Adapter | Mechanism | Status |
 |---------|-----------|--------|
 | `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **Shipped** in v0.4.0 ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
-| `ce-stream-postgres` | Logical decoding / replication protocol (sketch) | Deferred |
+| `ce-stream-postgres` | Logical replication (`pgoutput`), PostgreSQL 17+ | **Built** on the branch, not released ([#19](https://github.com/AxialDB/ce-stream/issues/19), [`issues/19.md`](issues/19.md)) |
 | `ce-stream-sqlite` | update hooks / session (different shape, sketch) | Deferred |
 | MSSQL | Prefer consuming **CES** if available; not a binlog clone (sketch) | Deferred |
 

@@ -111,6 +111,9 @@ pub(crate) fn catalog_sql(oids: &[u32], publication: &str) -> String {
     )
 }
 
+/// What the connection of [`catalog_tables`] is told before its query.
+const CATALOG_SESSION: &str = "SET jit = off";
+
 pub async fn catalog_tables(
     options: &PostgresOptions,
     oids: &[u32],
@@ -120,6 +123,12 @@ pub async fn catalog_tables(
         return Ok(Vec::new());
     }
     let mut conn = Connection::connect(options, false).await?;
+    // The server prices this query far over its JIT limits (it counts the
+    // function scans inside the subqueries at 500 and 1,000 rows each) and
+    // compiles it anew at every call: 0.55 s of compiling for 2 ms of reading,
+    // whatever the number of tables (measured on 17, `docs/issues/19.md`).
+    // The rows are few, so nothing here is worth compiling.
+    conn.query(CATALOG_SESSION).await?;
     let rows = conn.query(&catalog_sql(oids, publication)).await?;
     let mut tables = Vec::with_capacity(rows.len());
     for row in rows {

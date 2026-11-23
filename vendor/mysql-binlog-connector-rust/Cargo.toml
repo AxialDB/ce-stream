@@ -4,7 +4,7 @@
 [package]
 edition = "2021"
 name = "ce-stream-mysql-binlog"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Shicai Xu <chenglingsu@126.com>", "AxialDB"]
 categories = ["database"]
 description = "MySQL binlog connector fork for ce-stream. SHOW BINARY LOG STATUS for MySQL 8.4+ and 9.x. Based on apecloud/mysql-binlog-connector-rust."

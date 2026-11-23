@@ -77,6 +77,12 @@ impl TxnGrouper {
         self
     }
 
+    /// The list the open transaction was started with: its later events are
+    /// judged by it, not by a newer one.
+    pub fn pinned(&self) -> Option<&IncludeFilter> {
+        self.open.as_ref().map(|group| &group.filter)
+    }
+
     pub fn push(&mut self, incoming: Incoming, filter: &IncludeFilter) -> Vec<Emit> {
         let Some(key) = incoming.txn_key.clone() else {
             let mut out = self.flush(None);

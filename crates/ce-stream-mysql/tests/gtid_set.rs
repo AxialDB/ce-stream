@@ -34,7 +34,10 @@ fn handshake_is_history_lost_when_the_server_purged_past_the_checkpoint() {
         &format!("{uuid}:1-183"),
     )
     .unwrap_err();
-    assert!(matches!(err, ce_stream_core::Error::HistoryLost(_)), "{err}");
+    assert!(
+        matches!(err, ce_stream_core::Error::HistoryLost(_)),
+        "{err}"
+    );
     assert_eq!(
         ce_stream_mysql::purged_missing(
             &format!("{uuid}:1-123"),

@@ -24,6 +24,14 @@ impl IncludeFilter {
         }
     }
 
+    /// The subjects both filters allow.
+    pub fn both(&self, other: &IncludeFilter) -> IncludeFilter {
+        match (self, other) {
+            (Self::All, filter) | (filter, Self::All) => filter.clone(),
+            (Self::Only(a), Self::Only(b)) => Self::Only(a.intersection(b).cloned().collect()),
+        }
+    }
+
     fn from_tables<I, T>(tables: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -60,10 +68,13 @@ struct Inner {
 /// events are not filtered (same as v0.2.0).
 ///
 /// An adapter that filters at its source (Mongo, with a server-side `$match`)
-/// reports the list its open stream uses through [`Self::set_in_effect`]. An
-/// embedder that must not miss the first change of a table it just added waits
-/// for [`Self::in_effect_allows`]. The MySQL adapter filters in this process
-/// and reports nothing.
+/// reports what it delivers through [`Self::set_in_effect`]: the subjects its
+/// open stream sends *and* the list it judges the events it reads by. A list
+/// replaced while the adapter waits for the server takes effect at its next
+/// read, so it reports the new list only from then. An embedder that must not
+/// miss the first change of a table it just added waits for
+/// [`Self::in_effect_allows`]. The MySQL adapter filters in this process and
+/// reports nothing.
 #[derive(Clone, Debug)]
 pub struct IncludeList {
     inner: Arc<RwLock<Inner>>,
@@ -286,6 +297,22 @@ mod tests {
         assert!(list.in_effect_allows("demo.late"));
         adapter.set_in_effect(None);
         assert!(!list.in_effect_allows("demo.orders"));
+    }
+
+    #[test]
+    fn both_allows_what_each_allows() {
+        let only = |subjects: &[&str]| {
+            IncludeFilter::Only(subjects.iter().map(|s| s.to_string()).collect())
+        };
+        let ab = only(&["d.a", "d.b"]);
+        let bc = only(&["d.b", "d.c"]);
+        assert_eq!(ab.both(&bc), only(&["d.b"]));
+        assert_eq!(IncludeFilter::All.both(&ab), ab);
+        assert_eq!(ab.both(&IncludeFilter::All), ab);
+        assert_eq!(
+            IncludeFilter::All.both(&IncludeFilter::All),
+            IncludeFilter::All
+        );
     }
 
     #[test]

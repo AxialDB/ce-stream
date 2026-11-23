@@ -195,7 +195,7 @@ source.run_deliveries(|_delivery| Ok(())).await
 - A subject is `schema.table`: one stream is one database, which goes in `source_id`.
 - `TableSchema.identity` and the controls carry the relation OID, which survives a rename.
 - A row of a partition has the partition as its subject. With its parent on the include list, the row says so in the extensions `partition_root` and `partition_root_oid`.
-- A drop or a rename sends nothing on the stream. `catalog_tables` runs the query that shows them, on a connection you supply.
+- A drop or a rename sends nothing on the stream. `catalog_tables` runs the query that shows them, on a connection you supply. It turns JIT off on that connection: the server would compile the query at every call, half a second for a read of milliseconds.
 - A failover slot (`create_slot(.., true)`, or `alter_slot_failover` on an existing one, before the stream starts) is copied to a standby that runs `sync_replication_slots`; `SlotFigures::failover` and `synced` show it. After a promotion the stream resumes on the new primary when the checkpoint is at or before the point where the new timeline forked from the old one; a checkpoint past that point is `Error::Checkpoint`, and `fork_point` gives the embedder that point to compare with what it applied. A server on an older timeline than the checkpoint's (an old primary) is refused.
 - The embedder installs a `rustls` crypto provider before connecting with TLS.
 
