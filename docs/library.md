@@ -1,6 +1,6 @@
 # Using ce-stream as a library
 
-**Status:** Supported. MySQL 9.x, MongoDB 8.0+, and PostgreSQL 17+ ([#19](https://github.com/AxialDB/ce-stream/issues/19), not released). Other adapters are deferred.
+**Status:** Supported. MySQL 9.x, MongoDB 8.0+, and PostgreSQL 17+ ([#19](https://github.com/AxialDB/ce-stream/issues/19), v0.6.0). Other adapters are deferred.
 
 The CLI is a thin host. Embed capture in your own process with the same single ordered reader. The examples here compile: `cargo test --doc -p ce-stream-cli`.
 

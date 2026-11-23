@@ -137,7 +137,7 @@ Validates [#1](https://github.com/AxialDB/ce-stream/issues/1): kill ce-stream af
 
 **AxialDB harness** (MySQL 9.x lab, Windows or WSL):
 
-- [`scripts/crash-harness/README.md`](../../scripts/crash-harness/README.md)
+- [`scripts/crash-harness/README.md`](../scripts/crash-harness/README.md)
 - Windows: `.\scripts\crash-harness\mysql\run-crash-harness.ps1`
 - WSL Ubuntu (port 3307): `.\scripts\crash-harness\mysql\run-crash-harness.ps1 -Wsl`
 

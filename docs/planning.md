@@ -128,14 +128,14 @@ Location: [`scripts/perf/`](../scripts/perf/). Spec: [`docs/perf-harness.md`](pe
 
 ---
 
-## Phase 6 — Multi-DB adapters — **MongoDB shipped in v0.4.0; others deferred**
+## Phase 6 — Multi-DB adapters — **MongoDB shipped in v0.4.0, PostgreSQL in v0.6.0; others deferred**
 
 Same `ChangeSource` / CloudEvent envelope:
 
 | Adapter | Mechanism | Status |
 |---------|-----------|--------|
 | `ce-stream-mongo` | Change streams, MongoDB 8.0+ replica set | **Shipped** in v0.4.0 ([#5](https://github.com/AxialDB/ce-stream/issues/5), [`issues/5.md`](issues/5.md)) |
-| `ce-stream-postgres` | Logical replication (`pgoutput`), PostgreSQL 17+ | **Built** on the branch, not released ([#19](https://github.com/AxialDB/ce-stream/issues/19), [`issues/19.md`](issues/19.md)) |
+| `ce-stream-postgres` | Logical replication (`pgoutput`), PostgreSQL 17+ | **Shipped** in v0.6.0 ([#19](https://github.com/AxialDB/ce-stream/issues/19), [`issues/19.md`](issues/19.md)) |
 | `ce-stream-sqlite` | update hooks / session (different shape, sketch) | Deferred |
 | MSSQL | Prefer consuming **CES** if available; not a binlog clone (sketch) | Deferred |
 
@@ -167,7 +167,9 @@ Phase 0 → 1 (spike) → 2 (MVP) → 3 (HTTP E2E) → 4 (harden)
   → 4.5 (perf harness) → 5 (Avro)  [done]
   → OSS readiness / v0.1 tag
   → v0.2.0 (#1 Gate 0) → v0.3.0 (#3 live include list)
-  → Phase 6: MongoDB (#5, v0.4.0); other DBs only if un-deferred
+  → Phase 6: MongoDB (#5, v0.4.0)
+  → v0.4.2, v0.4.3, v0.5.0 (#16 long transactions in parts)
+  → one contract for every source, PostgreSQL (#19, v0.6.0); other DBs only if un-deferred
 ```
 
-**Now:** [#19](https://github.com/AxialDB/ce-stream/issues/19) stays on its branch, unreleased, until AxialDB has built its hosts on it. SQLite and MSSQL stay deferred.
+**Now:** [#19](https://github.com/AxialDB/ce-stream/issues/19) shipped in v0.6.0, after AxialDB built its MySQL, MongoDB and PostgreSQL hosts on it. SQLite and MSSQL stay deferred.

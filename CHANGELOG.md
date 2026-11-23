@@ -7,8 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-One contract for every source, and `ce-stream-postgres` ([issue #19](https://github.com/AxialDB/ce-stream/issues/19)). To be released as 0.6.0.
-Release notes (draft): [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md).
+## [0.6.0] - 2026-11-23
+
+One contract for every source, and `ce-stream-postgres` ([issue #19](https://github.com/AxialDB/ce-stream/issues/19)).
+Release notes: [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md).
 
 ### Fixed
 
@@ -261,7 +263,11 @@ Release notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md).
 - Other database engines (Phase 6 parked).
 - Schema Registry / typed per-table Avro.
 
-[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/AxialDB/ce-stream/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.6.0
+[0.5.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.5.0
+[0.4.3]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.3
+[0.4.2]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.2
 [0.4.1]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.1
 [0.4.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.4.0
 [0.3.0]: https://github.com/AxialDB/ce-stream/releases/tag/v0.3.0

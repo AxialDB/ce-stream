@@ -42,5 +42,5 @@ Artifacts: `out/<timestamp>/` (checkpoint, TOML, logs, `summary.json`) - gitigno
 
 ## Related
 
-- [`docs/ops-e2e.md`](../../docs/ops-e2e.md)
+- [`docs/ops-e2e.md`](../../../docs/ops-e2e.md)
 - `crates/ce-stream-mysql/tests/txn_checkpoint.rs`
