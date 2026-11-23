@@ -193,7 +193,7 @@ impl MysqlBinlogSource {
         let baseline = cp.payload.get("baseline_gtid").and_then(|v| v.as_str());
         let url = self.options.connection_url();
         let purged = gate::fetch_global_gtid(&url, "gtid_purged").await?;
-        if baseline.map_or(true, |s| s.trim().is_empty()) {
+        if baseline.is_none_or(|s| s.trim().is_empty()) {
             tracing::warn!(
                 "resuming from a checkpoint with no baseline_gtid (written before 0.2.0): \
                  transactions the server purged cannot be told from ones it never sent"

@@ -1,5 +1,5 @@
-//! PostgreSQL logical replication source: `pgoutput` over an own protocol layer,
-//! with no libpq. See `docs/issues/19.md`.
+//! PostgreSQL 17+ logical replication source: `pgoutput` over its own protocol layer,
+//! with no libpq. Its design and tests: [issue 19](https://github.com/AxialDB/ce-stream/blob/main/docs/issues/19.md).
 //!
 //! The embedder installs a `rustls` crypto provider before connecting with TLS.
 

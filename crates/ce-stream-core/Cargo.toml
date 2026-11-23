@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
-keywords = ["cdc", "cloudevents", "mysql", "mongodb"]
+keywords = ["cdc", "cloudevents", "mysql", "mongodb", "postgresql"]
 categories = ["database"]
 rust-version.workspace = true
 
